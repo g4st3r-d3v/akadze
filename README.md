@@ -4,7 +4,7 @@ Postgres-backed task queue: enqueue work, run workers, optionally schedule with 
 
 Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP LOCKED` + lease), not Redis or RabbitMQ.
 
-**Status:** pre-alpha scaffold. API will move.
+**Status:** pre-alpha scaffold. Python API will move.
 
 ## Goals
 
@@ -15,6 +15,7 @@ Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP
 
 ## Non-goals (for now)
 
+- HTTP / REST / web UI (another library or app owns that)
 - Replacing any product service queue
 - Multi-broker adapters
 - Distributed tracing / full observability suite
@@ -32,11 +33,10 @@ akadze beat
 
 ```text
 akadze/   # library package
-kb/       # knowledge harness (design, research)
 tests/
 ```
 
-Design notes and decisions: start at [`kb/HUB.md`](kb/HUB.md).
+Design notes live in Obsidian «База Знаний» (`Проекты/IT/akadze`), mirrored on GitHub as [`g4st3r-d3v/obsidian-kb`](https://github.com/g4st3r-d3v/obsidian-kb). This repo has no `kb/`.
 
 ## License
 
