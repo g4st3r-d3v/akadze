@@ -4,14 +4,14 @@ Postgres-backed task queue: enqueue work, run workers, optionally schedule with 
 
 Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP LOCKED` + lease), not Redis or RabbitMQ.
 
-**Status:** pre-alpha scaffold. Python API will move.
+**Status:** pre-alpha scaffold. The Python call surface will move.
 
 ## Goals
 
 - Small library, no product domain
 - Tasks, retries, lease recovery
 - Beat: cron / interval → enqueue
-- Clear Python API; CLI for worker and beat
+- Clear Python call surface; CLI for worker and beat
 
 ## Non-goals (for now)
 
