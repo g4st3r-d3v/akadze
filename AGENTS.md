@@ -11,6 +11,8 @@ Library: Postgres task queue + worker + optional beat. No product domain. No HTT
 - Prefer small, testable increments
 - Conventional commits
 - Tests hit real Postgres through `AKADZE_DATABASE_URL`. Do not add an in-memory database
+- Tests follow AAA: Arrange, Act, Assert, one act per test
+- Commands change state and return nothing. Queries return state and change nothing. Pure functions do neither
 
 ## Ask first
 

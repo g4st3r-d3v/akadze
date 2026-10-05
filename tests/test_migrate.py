@@ -4,21 +4,60 @@ import asyncio
 import os
 import subprocess
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import asyncpg
 import pytest
 
-from akadze import migrate
+from akadze import applied_versions, migrate
 from akadze.schema import MigrateError, split_sql
 
 
-async def test_migrate_creates_schema_and_is_idempotent(database_url: str) -> None:
-    applied = await migrate(database_url)
-    assert applied == ["001_initial"]
-
-    conn = await asyncpg.connect(database_url)
+@asynccontextmanager
+async def _connection(database_url: str) -> AsyncIterator[asyncpg.Connection]:
+    connection = await asyncpg.connect(database_url)
     try:
-        tables = await conn.fetch(
+        yield connection
+    finally:
+        await connection.close()
+
+
+def _cli(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "akadze.cli", "migrate"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+async def test_applied_versions_does_not_create_schema(database_url: str) -> None:
+    # Act
+    versions = await applied_versions(database_url)
+
+    # Assert
+    assert versions == []
+    async with _connection(database_url) as connection:
+        exists = await connection.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.schemata WHERE schema_name = 'akadze'
+            )
+            """
+        )
+    assert exists is False
+
+
+async def test_migrate_creates_schema(database_url: str) -> None:
+    # Act
+    await migrate(database_url)
+
+    # Assert
+    assert await applied_versions(database_url) == ["001_initial"]
+    async with _connection(database_url) as connection:
+        tables = await connection.fetch(
             """
             SELECT table_name
             FROM information_schema.tables
@@ -26,151 +65,190 @@ async def test_migrate_creates_schema_and_is_idempotent(database_url: str) -> No
             ORDER BY table_name
             """
         )
-        assert [row["table_name"] for row in tables] == [
-            "jobs",
-            "periodic_runs",
-            "schema_migrations",
-            "workers",
-        ]
-
-        identity = await conn.fetchval(
+        identity = await connection.fetchval(
             """
             SELECT is_identity
             FROM information_schema.columns
             WHERE table_schema = 'akadze' AND table_name = 'jobs' AND column_name = 'id'
             """
         )
-        assert identity == "YES"
-
-        result_nullable = await conn.fetchval(
+        result_nullable = await connection.fetchval(
             """
             SELECT is_nullable
             FROM information_schema.columns
             WHERE table_schema = 'akadze' AND table_name = 'jobs' AND column_name = 'result'
             """
         )
-        assert result_nullable == "YES"
-
-        claim_index = await conn.fetchval(
+        claim_index = await connection.fetchval(
             """
             SELECT indexdef
             FROM pg_indexes
             WHERE schemaname = 'akadze' AND indexname = 'jobs_claim_idx'
             """
         )
-        assert "priority DESC" in claim_index
+    assert [row["table_name"] for row in tables] == [
+        "jobs",
+        "periodic_runs",
+        "schema_migrations",
+        "workers",
+    ]
+    assert identity == "YES"
+    assert result_nullable == "YES"
+    assert claim_index is not None
+    assert "priority DESC" in claim_index
 
-        inserted = await conn.fetchrow(
+
+async def test_migrate_is_idempotent(database_url: str) -> None:
+    # Arrange
+    await migrate(database_url)
+
+    # Act
+    await migrate(database_url)
+
+    # Assert
+    assert await applied_versions(database_url) == ["001_initial"]
+
+
+async def test_job_row_uses_defaults(database_url: str) -> None:
+    # Arrange
+    await migrate(database_url)
+
+    # Act
+    async with _connection(database_url) as connection:
+        inserted = await connection.fetchrow(
             """
             INSERT INTO akadze.jobs (task)
             VALUES ('demo')
             RETURNING queue, priority, state, result
             """
         )
-        assert dict(inserted) == {
-            "queue": "default",
-            "priority": 0,
-            "state": "queued",
-            "result": None,
-        }
-        versions = await conn.fetchval("SELECT count(*) FROM akadze.schema_migrations")
-        assert versions == 1
-    finally:
-        await conn.close()
 
-    assert await migrate(database_url) == []
+    # Assert
+    assert dict(inserted) == {
+        "queue": "default",
+        "priority": 0,
+        "state": "queued",
+        "result": None,
+    }
 
 
-async def test_state_check_and_active_unique_key(database_url: str) -> None:
+async def test_invalid_state_is_rejected(database_url: str) -> None:
+    # Arrange
     await migrate(database_url)
-    conn = await asyncpg.connect(database_url)
-    try:
+
+    # Act / Assert
+    async with _connection(database_url) as connection:
         with pytest.raises(asyncpg.CheckViolationError):
-            await conn.execute(
+            await connection.execute(
                 "INSERT INTO akadze.jobs (task, state) VALUES ('demo', 'nope')"
             )
 
-        await conn.execute(
+
+async def test_active_unique_key_rejects_a_duplicate(database_url: str) -> None:
+    # Arrange
+    await migrate(database_url)
+    async with _connection(database_url) as connection:
+        await connection.execute(
             "INSERT INTO akadze.jobs (task, unique_key) VALUES ('demo', 'vendor:1')"
         )
+
+        # Act / Assert
         with pytest.raises(asyncpg.UniqueViolationError):
-            await conn.execute(
+            await connection.execute(
                 "INSERT INTO akadze.jobs (task, unique_key) VALUES ('other', 'vendor:1')"
             )
 
-        await conn.execute(
+
+async def test_unique_key_is_free_after_success(database_url: str) -> None:
+    # Arrange
+    await migrate(database_url)
+    async with _connection(database_url) as connection:
+        await connection.execute(
+            "INSERT INTO akadze.jobs (task, unique_key) VALUES ('demo', 'vendor:1')"
+        )
+        await connection.execute(
             """
             UPDATE akadze.jobs
             SET state = 'succeeded', finished_at = now()
             WHERE unique_key = 'vendor:1'
             """
         )
-        await conn.execute(
+
+        # Act
+        await connection.execute(
             "INSERT INTO akadze.jobs (task, unique_key) VALUES ('again', 'vendor:1')"
         )
-    finally:
-        await conn.close()
+
+        # Assert
+        count = await connection.fetchval(
+            "SELECT count(*) FROM akadze.jobs WHERE unique_key = 'vendor:1'"
+        )
+    assert count == 2
 
 
 async def test_concurrent_migrate_applies_once(database_url: str) -> None:
-    first, second = await asyncio.gather(migrate(database_url), migrate(database_url))
-    assert sorted([*first, *second]) == ["001_initial"]
+    # Act
+    await asyncio.gather(migrate(database_url), migrate(database_url))
 
-    conn = await asyncpg.connect(database_url)
-    try:
-        count = await conn.fetchval("SELECT count(*) FROM akadze.schema_migrations")
-    finally:
-        await conn.close()
-    assert count == 1
+    # Assert
+    assert await applied_versions(database_url) == ["001_initial"]
 
 
-async def test_cli_migrate_and_missing_url(database_url: str) -> None:
-    env = dict(os.environ.items())
+async def test_cli_migrate_prints_applied_version(database_url: str) -> None:
+    # Arrange
+    env = os.environ.copy()
     env["AKADZE_DATABASE_URL"] = database_url
-    first = subprocess.run(
-        [sys.executable, "-m", "akadze.cli", "migrate"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert first.returncode == 0, first.stderr
-    assert "applied 001_initial" in first.stdout
-    assert database_url not in first.stdout + first.stderr
 
-    second = subprocess.run(
-        [sys.executable, "-m", "akadze.cli", "migrate"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert second.returncode == 0, second.stderr
-    assert "schema up to date" in second.stdout
-    assert database_url not in second.stdout + second.stderr
+    # Act
+    result = _cli(env)
 
-    env.pop("AKADZE_DATABASE_URL")
-    missing = subprocess.run(
-        [sys.executable, "-m", "akadze.cli", "migrate"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert missing.returncode == 2
-    assert "AKADZE_DATABASE_URL is not set" in missing.stderr
+    # Assert
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "applied 001_initial"
+    assert database_url not in output
+
+
+async def test_cli_migrate_prints_up_to_date(database_url: str) -> None:
+    # Arrange
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = database_url
+    setup = _cli(env)
+    if setup.returncode != 0:
+        raise RuntimeError(setup.stderr)
+
+    # Act
+    result = _cli(env)
+
+    # Assert
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "schema up to date"
+    assert database_url not in output
+
+
+def test_cli_migrate_requires_database_url() -> None:
+    # Arrange
+    env = os.environ.copy()
+    env.pop("AKADZE_DATABASE_URL", None)
+
+    # Act
+    result = _cli(env)
+
+    # Assert
+    assert result.returncode == 2
+    assert "AKADZE_DATABASE_URL is not set" in result.stderr
 
 
 def test_cli_connection_refused_hides_password_and_traceback() -> None:
+    # Arrange
     env = os.environ.copy()
     env["AKADZE_DATABASE_URL"] = "postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze"
-    result = subprocess.run(
-        [sys.executable, "-m", "akadze.cli", "migrate"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+
+    # Act
+    result = _cli(env)
+
+    # Assert
     output = result.stdout + result.stderr
     assert result.returncode == 1
     assert "migrate failed:" in result.stderr
@@ -179,8 +257,14 @@ def test_cli_connection_refused_hides_password_and_traceback() -> None:
 
 
 def test_split_sql_ignores_semicolons_in_quotes_and_comments() -> None:
+    # Arrange
     script = "SELECT ';'; -- semi;\nSELECT 1; /* semi; */\nSELECT 2;"
-    assert split_sql(script) == [
+
+    # Act
+    statements = split_sql(script)
+
+    # Assert
+    assert statements == [
         "SELECT ';'",
         "-- semi;\nSELECT 1",
         "/* semi; */\nSELECT 2",
@@ -188,10 +272,13 @@ def test_split_sql_ignores_semicolons_in_quotes_and_comments() -> None:
 
 
 async def test_dollar_quotes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
     monkeypatch.setattr(
         "akadze.schema._migration_scripts",
         lambda: [("001_bad", "DO $$ BEGIN NULL; END $$;")],
     )
+
+    # Act / Assert
     with pytest.raises(MigrateError, match="dollar quotes") as caught:
         await migrate("postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze")
     assert "super-secret-pw" not in str(caught.value)
