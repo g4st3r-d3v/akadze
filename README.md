@@ -32,8 +32,11 @@ akadze beat
 
 ```text
 akadze/   # library package
+kb/       # knowledge harness (design, research)
 tests/
 ```
+
+Design notes and decisions: start at [`kb/HUB.md`](kb/HUB.md).
 
 ## License
 
