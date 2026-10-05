@@ -9,6 +9,7 @@ import asyncpg
 import pytest
 
 from akadze import migrate
+from akadze.schema import MigrateError, split_sql
 
 
 async def test_migrate_creates_schema_and_is_idempotent(database_url: str) -> None:
@@ -158,3 +159,39 @@ async def test_cli_migrate_and_missing_url(database_url: str) -> None:
     )
     assert missing.returncode == 2
     assert "AKADZE_DATABASE_URL is not set" in missing.stderr
+
+
+def test_cli_connection_refused_hides_password_and_traceback() -> None:
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = "postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze"
+    result = subprocess.run(
+        [sys.executable, "-m", "akadze.cli", "migrate"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "migrate failed:" in result.stderr
+    assert "Traceback" not in output
+    assert "super-secret-pw" not in output
+
+
+def test_split_sql_ignores_semicolons_in_quotes_and_comments() -> None:
+    script = "SELECT ';'; -- semi;\nSELECT 1; /* semi; */\nSELECT 2;"
+    assert split_sql(script) == [
+        "SELECT ';'",
+        "-- semi;\nSELECT 1",
+        "/* semi; */\nSELECT 2",
+    ]
+
+
+async def test_dollar_quotes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "akadze.schema._migration_scripts",
+        lambda: [("001_bad", "DO $$ BEGIN NULL; END $$;")],
+    )
+    with pytest.raises(MigrateError, match="dollar quotes") as caught:
+        await migrate("postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze")
+    assert "super-secret-pw" not in str(caught.value)

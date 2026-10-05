@@ -41,7 +41,7 @@ def _run_migrate() -> int:
         return 2
     try:
         applied = asyncio.run(migrate(database_url))
-    except (MigrateError, ValueError) as exc:
+    except (MigrateError, ValueError, OSError) as exc:
         print(f"migrate failed: {redact_database_url(str(exc), database_url)}", file=sys.stderr)
         return 1
     if applied:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -43,12 +44,18 @@ def redact_database_url(message: str, database_url: str) -> str:
         redacted = redacted.replace(async_database_url(database_url), "postgresql://***")
     except ValueError:
         pass
-    return re.sub(r"://[^\s/@]+:[^\s/@]+@", "://***@", redacted)
+    redacted = re.sub(r"://[^\s/@]+:[^\s/@]+@", "://***@", redacted)
+    password = urlparse(database_url).password
+    if password is not None and len(password) >= 4:
+        redacted = redacted.replace(password, "***")
+    return redacted
 
 
 async def migrate(database_url: str) -> list[str]:
     """Apply pending migrations. Return the version ids applied in this call."""
 
+    scripts = _migration_scripts()
+    _reject_dollar_quotes(scripts)
     engine = create_async_engine(
         async_database_url(database_url),
         poolclass=NullPool,
@@ -56,21 +63,23 @@ async def migrate(database_url: str) -> list[str]:
     )
     try:
         async with engine.begin() as conn:
-            return await _migrate_locked(conn)
-    except SQLAlchemyError as exc:
-        raise MigrateError(redact_database_url(str(exc), database_url)) from None
+            return await _migrate_locked(conn, scripts)
+    except (SQLAlchemyError, OSError) as exc:
+        raise MigrateError(_public_db_error(exc, database_url)) from None
     finally:
         await engine.dispose()
 
 
-async def _migrate_locked(conn: AsyncConnection) -> list[str]:
+async def _migrate_locked(
+    conn: AsyncConnection, scripts: list[tuple[str, str]]
+) -> list[str]:
     await conn.execute(text(_LOCK_SQL))
     for statement in _BOOTSTRAP_SQL:
         await conn.execute(text(statement))
     rows = await conn.execute(text("SELECT version FROM akadze.schema_migrations"))
     done = {str(row[0]) for row in rows}
     applied: list[str] = []
-    for version, script in _migration_scripts():
+    for version, script in scripts:
         if version in done:
             continue
         for statement in split_sql(script):
@@ -90,6 +99,19 @@ def _migration_scripts() -> list[tuple[str, str]]:
     if not scripts:
         raise MigrateError("no schema migrations packaged")
     return scripts
+
+
+def _reject_dollar_quotes(scripts: list[tuple[str, str]]) -> None:
+    for version, script in scripts:
+        if "$$" in script:
+            raise MigrateError(
+                f"migration {version} contains dollar quotes; migrate cannot split those"
+            )
+
+
+def _public_db_error(exc: BaseException, database_url: str) -> str:
+    message = str(exc).strip() or type(exc).__name__
+    return redact_database_url(message, database_url)
 
 
 def split_sql(script: str) -> list[str]:

@@ -30,6 +30,8 @@ akadze migrate
 
 `akadze worker` and `akadze beat` are still stubs. The migrate command creates schema `akadze` (jobs, workers, periodic runs). Higher `priority` is claimed first. `result` is optional.
 
+Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
+
 ## Layout
 
 ```text
