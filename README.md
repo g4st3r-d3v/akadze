@@ -36,7 +36,7 @@ akadze/   # library package
 tests/
 ```
 
-Design notes live in Obsidian «База Знаний» (`Проекты/IT/akadze`), mirrored on GitHub as [`g4st3r-d3v/obsidian-kb`](https://github.com/g4st3r-d3v/obsidian-kb). This repo has no `kb/`.
+Design notes: [`g4st3r-d3v/akadze-harness`](https://github.com/g4st3r-d3v/akadze-harness) (`HUB.md`). This repo is code-only.
 
 ## License
 
