@@ -23,8 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(
-        f"akadze {__version__}: `{args.command}` is not implemented yet. "
-        "See kb/ for the plan.",
+        f"akadze {__version__}: `{args.command}` is not implemented yet.",
         file=sys.stderr,
     )
     return 1

@@ -7,7 +7,7 @@ Library: Postgres task queue + worker + optional beat. No product domain.
 ## Always
 
 - Reply to the owner in **Russian** unless they write in English and ask to switch
-- Keep `kb/` as the intent source; update notes when behavior lands
+- Specs / intent live in the owner's personal Obsidian vault «База Знаний» (`Проекты/IT/akadze`) — not in this repo
 - Prefer small, testable increments
 - Conventional commits
 

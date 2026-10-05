@@ -12,7 +12,6 @@ Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP
 - Tasks, retries, lease recovery
 - Beat: cron / interval → enqueue
 - Clear Python API; CLI for worker and beat
-- Knowledge base in `kb/` (Obsidian-friendly)
 
 ## Non-goals (for now)
 
@@ -32,8 +31,7 @@ akadze beat
 ## Layout
 
 ```text
-akadze/          # library package
-kb/              # knowledge base (Diátaxis-ish notes)
+akadze/   # library package
 tests/
 ```
 
