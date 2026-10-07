@@ -102,6 +102,9 @@ def _load_app(spec: str) -> Akadze:
     if separator != ":" or not module_name or not attribute:
         print("app must look like package.module:app", file=sys.stderr)
         raise SystemExit(2)
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
     module = importlib.import_module(module_name)
     app = getattr(module, attribute, None)
     if not isinstance(app, Akadze):
