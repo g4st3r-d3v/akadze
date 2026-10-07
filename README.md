@@ -20,7 +20,9 @@ Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP
 - Multi-broker adapters
 - Distributed tracing / full observability suite
 
-## Quick start
+## First task
+
+Install the library, point it at the application database, and create the `akadze` schema. The tables live in that schema; they are not part of the application's own migrations.
 
 ```bash
 poetry install
@@ -28,7 +30,38 @@ export AKADZE_DATABASE_URL=postgresql://akadze:akadze@localhost:5432/akadze
 akadze migrate
 ```
 
-`akadze worker` and `akadze beat` are still stubs. The migrate command creates schema `akadze` (jobs, workers, periodic runs). Higher `priority` is claimed first. `result` is optional.
+Save this as `demo.py`. `enqueue` runs in the caller's transaction, so a rollback removes the job.
+
+```python
+import asyncio
+
+from akadze import Akadze
+
+app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
+
+
+@app.task("hello")
+async def hello(name: str) -> str:
+    return f"hello {name}"
+
+
+async def main() -> None:
+    async with app.engine.begin() as connection:
+        await hello.using(session=connection).enqueue(name="ada")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run the worker. It claims the job, runs `hello`, and sets the row to `succeeded`. Stop it with Ctrl-C. Periodic tasks run in this same process; there is no separate beat.
+
+```bash
+python demo.py
+akadze worker demo:app
+```
+
+`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`) through `using(...)`, not as task arguments.
 
 Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
 
