@@ -15,6 +15,7 @@ from typing import Any, TypeGuard
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from akadze.args import load_arguments
@@ -51,18 +52,24 @@ class Worker:
         heartbeat_interval: timedelta = timedelta(seconds=5),
         heartbeat_ttl: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=1),
+        shutdown_timeout: timedelta = timedelta(seconds=10),
     ) -> None:
         if slots < 1:
             raise ValueError("slots must be at least 1")
+        if shutdown_timeout < timedelta(0):
+            raise ValueError("shutdown_timeout must not be negative")
         self.app = app
         self.queues = queues or ["default"]
         self.slots = slots
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_ttl = heartbeat_ttl
         self.poll_interval = poll_interval
+        self.shutdown_timeout = shutdown_timeout
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
         self._last_heartbeat_ok = time.monotonic()
+        self._abandon = False
+        self._draining = False
 
     async def register(self) -> None:
         async with self.app.engine.begin() as connection:
@@ -160,6 +167,7 @@ class Worker:
                 now = time.monotonic()
                 if now - self._last_heartbeat_ok > self.heartbeat_ttl.total_seconds():
                     logger.info("worker %s heartbeat is stale; stopping", self.id)
+                    self._abandon = True
                     return
                 if now >= next_heartbeat:
                     await self.heartbeat()
@@ -169,6 +177,8 @@ class Worker:
                     await prune(self.app.engine, retention=self.app.retention)
                     next_prune = now + 60
                 await schedule_due(self.app)
+                if stop.is_set():
+                    break
                 if await self._spawn():
                     continue
                 try:
@@ -181,17 +191,38 @@ class Worker:
     async def shutdown(self) -> None:
         """Return unfinished jobs to the queue without spending an attempt."""
 
-        tasks = list(self._inflight.values())
-        for task in tasks:
+        if not self._abandon:
+            await self._drain_inflight()
+        pending = [task for task in self._inflight.values() if not task.done()]
+        for task in pending:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         async with self.app.engine.begin() as connection:
             await _release(connection, self.app.hooks, self.id)
             await connection.execute(
                 text("DELETE FROM akadze.workers WHERE id = :id"),
                 {"id": self.id},
             )
+
+    async def _drain_inflight(self) -> None:
+        self._draining = True
+        deadline = time.monotonic() + self.shutdown_timeout.total_seconds()
+        while self._inflight and time.monotonic() < deadline:
+            try:
+                await self.heartbeat()
+            except (SQLAlchemyError, OSError):
+                logger.info("worker %s heartbeat failed during shutdown", self.id)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            interval = self.heartbeat_interval.total_seconds()
+            timeout = remaining if interval <= 0 else min(interval, remaining)
+            pending = list(self._inflight.values())
+            if not pending:
+                return
+            await asyncio.wait(pending, timeout=timeout)
 
     async def _execute(self, job: Job) -> None:
         async def finish(connection: AsyncConnection) -> None:
