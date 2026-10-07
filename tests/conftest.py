@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 import asyncpg
 import pytest
 
+from akadze import Akadze, migrate
+
 
 @pytest.fixture
 async def database_url() -> AsyncIterator[str]:
@@ -27,6 +29,16 @@ def _assert_disposable(url: str) -> None:
         "Refusing to drop schema akadze in database "
         f"{name!r}. Use a database named akadze or ending with _test."
     )
+
+
+@pytest.fixture
+async def app(database_url: str) -> AsyncIterator[Akadze]:
+    await migrate(database_url)
+    application = Akadze(database_url=database_url)
+    try:
+        yield application
+    finally:
+        await application.aclose()
 
 
 async def _drop_schema(url: str) -> None:
