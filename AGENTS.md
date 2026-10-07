@@ -10,6 +10,9 @@ Library: Postgres task queue + worker + optional beat. No product domain. No HTT
 - Specs / intent: https://github.com/g4st3r-d3v/akadze-harness (local: `/Users/g4st3r/Development/akadze-harness`). Start at `HUB.md`
 - Prefer small, testable increments
 - Conventional commits
+- Tests hit real Postgres through `AKADZE_DATABASE_URL`. Do not add an in-memory database
+- Tests follow AAA: Arrange, Act, Assert, one act per test
+- Commands change state and return nothing. Queries return state and change nothing. Pure functions do neither
 
 ## Ask first
 

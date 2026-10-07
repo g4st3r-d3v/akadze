@@ -20,14 +20,17 @@ Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP
 - Multi-broker adapters
 - Distributed tracing / full observability suite
 
-## Quick start (planned)
+## Quick start
 
 ```bash
 poetry install
-# migrate / ensure schema
-akadze worker
-akadze beat
+export AKADZE_DATABASE_URL=postgresql://akadze:akadze@localhost:5432/akadze
+akadze migrate
 ```
+
+`akadze worker` and `akadze beat` are still stubs. The migrate command creates schema `akadze` (jobs, workers, periodic runs). Higher `priority` is claimed first. `result` is optional.
+
+Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
 
 ## Layout
 
