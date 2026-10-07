@@ -11,14 +11,15 @@ import socket
 import time
 from datetime import timedelta
 from functools import partial
-from typing import Any
+from typing import Any, TypeGuard
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from akadze.args import load_arguments
-from akadze.exc import Cancel
+from akadze.context import bind_run, reset_run
+from akadze.exc import AkadzeError, Cancel
 from akadze.hooks import Hooks
 from akadze.job import (
     _COLUMNS,
@@ -187,6 +188,10 @@ class Worker:
             )
 
     async def _execute(self, job: Job) -> None:
+        async def finish(connection: AsyncConnection) -> None:
+            await _complete_open_run(connection, self.app.hooks, job)
+
+        _run, token = bind_run(self.app.engine, finish)
         try:
             try:
                 result = await self._invoke(job)
@@ -195,10 +200,16 @@ class Worker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if _run.done:
+                    logger.info("job %s raised after complete_tx", job.id)
+                    return
                 await _finish(self.app.engine, self.app.hooks, job, exc, None)
             else:
+                if _run.done:
+                    return
                 await _finish(self.app.engine, self.app.hooks, job, None, result)
         finally:
+            reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
 
@@ -328,6 +339,25 @@ async def _release(connection: AsyncConnection, hooks: Hooks, worker_id: UUID) -
         logger.info("job %s running -> queued", job.id)
 
 
+async def _complete_open_run(connection: AsyncConnection, hooks: Hooks, job: Job) -> None:
+    current = await job_by_id(connection, job.id)
+    if not _owns(current, job):
+        raise AkadzeError("this run no longer owns the job")
+    if current.cancel_requested_at is not None or current.expired:
+        raise Cancel()
+    if not await _apply(connection, hooks, current, None, None):
+        raise AkadzeError("this run no longer owns the job")
+
+
+def _owns(current: Job | None, job: Job) -> TypeGuard[Job]:
+    return (
+        current is not None
+        and current.state == "running"
+        and current.run_count == job.run_count
+        and current.worker_id == job.worker_id
+    )
+
+
 async def _finish(
     engine: Any,
     hooks: Hooks,
@@ -337,57 +367,63 @@ async def _finish(
 ) -> None:
     async with engine.begin() as connection:
         current = await job_by_id(connection, job.id)
-        if (
-            current is None
-            or current.state != "running"
-            or current.run_count != job.run_count
-            or current.worker_id != job.worker_id
-        ):
+        if not _owns(current, job):
             logger.info("job %s finish discarded", job.id)
             return
-        if current.cancel_requested_at is not None or current.expired:
-            exc = Cancel()
-            result = None
-        outcome = decide(current, exc, result)
-        errors = push_error(list(current.errors), outcome)
-        updated = await connection.execute(
-            text(
-                f"""
-                UPDATE akadze.jobs
-                SET state = :state,
-                    attempt = :attempt,
-                    snoozes = :snoozes,
-                    run_at = CASE
-                        WHEN :has_delay THEN now() + CAST(:delay AS interval)
-                        ELSE run_at
-                    END,
-                    worker_id = CASE WHEN :state = 'queued' THEN NULL ELSE worker_id END,
-                    started_at = CASE WHEN :state = 'queued' THEN NULL ELSE started_at END,
-                    finished_at = CASE WHEN :state = 'queued' THEN NULL ELSE now() END,
-                    errors = CAST(:errors AS jsonb),
-                    result = CAST(:result AS jsonb)
-                WHERE id = :id AND run_count = :run_count AND state = 'running'
-                RETURNING {_COLUMNS}, false AS expired
-                """
-            ),
-            {
-                "state": outcome.state,
-                "attempt": outcome.attempt,
-                "snoozes": outcome.snoozes,
-                "has_delay": outcome.delay is not None,
-                "delay": outcome.delay or timedelta(0),
-                "errors": json.dumps(errors),
-                "result": outcome.result_json,
-                "id": job.id,
-                "run_count": job.run_count,
-            },
-        )
-        row = updated.mappings().first()
-        if row is None:
+        if not await _apply(connection, hooks, current, exc, result):
             logger.info("job %s finish discarded", job.id)
-            return
-        finished = job_from_mapping(row)
-        await hooks.ran_transition(connection, finished, current.state, finished.state)
-        logger.info("job %s %s -> %s", job.id, current.state, finished.state)
+
+
+async def _apply(
+    connection: AsyncConnection,
+    hooks: Hooks,
+    job: Job,
+    exc: BaseException | None,
+    result: object,
+) -> bool:
+    if job.cancel_requested_at is not None or job.expired:
+        exc = Cancel()
+        result = None
+    outcome = decide(job, exc, result)
+    errors = push_error(list(job.errors), outcome)
+    updated = await connection.execute(
+        text(
+            f"""
+            UPDATE akadze.jobs
+            SET state = :state,
+                attempt = :attempt,
+                snoozes = :snoozes,
+                run_at = CASE
+                    WHEN :has_delay THEN now() + CAST(:delay AS interval)
+                    ELSE run_at
+                END,
+                worker_id = CASE WHEN :state = 'queued' THEN NULL ELSE worker_id END,
+                started_at = CASE WHEN :state = 'queued' THEN NULL ELSE started_at END,
+                finished_at = CASE WHEN :state = 'queued' THEN NULL ELSE now() END,
+                errors = CAST(:errors AS jsonb),
+                result = CAST(:result AS jsonb)
+            WHERE id = :id AND run_count = :run_count AND state = 'running'
+            RETURNING {_COLUMNS}, false AS expired
+            """
+        ),
+        {
+            "state": outcome.state,
+            "attempt": outcome.attempt,
+            "snoozes": outcome.snoozes,
+            "has_delay": outcome.delay is not None,
+            "delay": outcome.delay or timedelta(0),
+            "errors": json.dumps(errors),
+            "result": outcome.result_json,
+            "id": job.id,
+            "run_count": job.run_count,
+        },
+    )
+    row = updated.mappings().first()
+    if row is None:
+        return False
+    finished = job_from_mapping(row)
+    await hooks.ran_transition(connection, finished, job.state, finished.state)
+    logger.info("job %s %s -> %s", job.id, job.state, finished.state)
+    return True
 
 
