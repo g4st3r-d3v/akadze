@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import socket
 import time
 from datetime import timedelta
@@ -36,6 +37,15 @@ from akadze.outcome import decide, push_error
 from akadze.periodic import schedule_due
 
 logger = logging.getLogger("akadze")
+
+
+def poll_delay(seconds: float, unit: float) -> float:
+    """Wait in `[seconds / 2, seconds]` so empty polls do not line up or spin."""
+
+    if seconds <= 0:
+        return 0.0
+    bounded = min(max(unit, 0.0), 1.0)
+    return seconds * (0.5 + 0.5 * bounded)
 
 
 class _Lost(Exception):
@@ -70,6 +80,7 @@ class Worker:
         self._last_heartbeat_ok = time.monotonic()
         self._abandon = False
         self._draining = False
+        self._last_claim_full = False
 
     async def register(self) -> None:
         async with self.app.engine.begin() as connection:
@@ -121,17 +132,23 @@ class Worker:
     async def claim_available(self) -> None:
         """Claim up to the free slots. The transaction closes before a task runs."""
 
+        full = False
+        self._last_claim_full = False
         async with self.app.engine.begin() as connection:
             for queue in self.queues:
                 await _cancel_due(connection, self.app.hooks, queue)
                 busy = await count_running(connection, self.id, queue)
-                await _claim(
+                limit = self.slots - busy
+                claimed = await _claim(
                     connection,
                     hooks=self.app.hooks,
                     worker_id=self.id,
                     queue=queue,
-                    limit=self.slots - busy,
+                    limit=limit,
                 )
+                if limit > 0 and claimed == limit:
+                    full = True
+        self._last_claim_full = full
 
     @property
     def running(self) -> tuple[asyncio.Task[None], ...]:
@@ -179,14 +196,21 @@ class Worker:
                 await schedule_due(self.app)
                 if stop.is_set():
                     break
-                if await self._spawn():
+                await self._spawn()
+                if stop.is_set():
+                    break
+                if self._last_claim_full:
                     continue
-                try:
-                    await asyncio.wait_for(stop.wait(), self.poll_interval.total_seconds())
-                except TimeoutError:
-                    continue
+                await self._pause(stop)
         finally:
             await self.shutdown()
+
+    async def _pause(self, stop: asyncio.Event) -> None:
+        delay = poll_delay(self.poll_interval.total_seconds(), random.random())
+        try:
+            await asyncio.wait_for(stop.wait(), delay)
+        except TimeoutError:
+            return
 
     async def shutdown(self) -> None:
         """Return unfinished jobs to the queue without spending an attempt."""
@@ -319,9 +343,9 @@ async def _claim(
     worker_id: UUID,
     queue: str,
     limit: int,
-) -> None:
+) -> int:
     if limit <= 0:
-        return
+        return 0
     result = await connection.execute(
         text(
             f"""
@@ -349,10 +373,13 @@ async def _claim(
         ),
         {"queue": queue, "limit": limit, "worker_id": worker_id},
     )
+    claimed = 0
     for row in result.mappings():
+        claimed += 1
         job = job_from_mapping(row)
         await hooks.ran_transition(connection, job, "queued", "running")
         logger.info("job %s queued -> running", job.id)
+    return claimed
 
 
 async def _release(connection: AsyncConnection, hooks: Hooks, worker_id: UUID) -> None:

@@ -5,7 +5,7 @@ import time
 from datetime import timedelta
 
 from akadze import Akadze
-from akadze.worker import Worker
+from akadze.worker import Worker, poll_delay
 from tests.pg import as_json, connection, job_row, job_rows
 
 
@@ -238,3 +238,135 @@ async def test_stale_heartbeat_returns_the_job_to_the_queue(
     assert row["state"] == "queued"
     assert row["attempt"] == 0
     assert row["worker_id"] is None
+
+
+def test_poll_delay_stays_within_half_of_the_interval() -> None:
+    # Act
+    low = poll_delay(2, 0)
+    high = poll_delay(2, 1)
+    idle = poll_delay(0, 0.9)
+
+    # Assert
+    assert low == 1
+    assert high == 2
+    assert idle == 0
+
+
+async def test_claim_is_full_when_every_free_slot_is_taken(app: Akadze) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+        await demo.using(session=session).enqueue()
+    worker = Worker(app, slots=1)
+
+    # Act
+    await worker.claim_available()
+
+    # Assert
+    assert worker._last_claim_full is True
+
+
+async def test_claim_is_not_full_when_a_slot_is_left(app: Akadze) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(app, slots=2)
+
+    # Act
+    await worker.claim_available()
+
+    # Assert
+    assert worker._last_claim_full is False
+
+
+async def _claims_until_pause(worker: Worker) -> int:
+    claims = 0
+    claim = worker.claim_available
+
+    async def count() -> None:
+        nonlocal claims
+        claims += 1
+        await claim()
+
+    async def stop_on_pause(stop: asyncio.Event) -> None:
+        stop.set()
+
+    worker.claim_available = count  # type: ignore[method-assign]
+    worker._pause = stop_on_pause  # type: ignore[method-assign]
+    await worker.serve(asyncio.Event())
+    return claims
+
+
+async def test_partial_claim_pauses_without_another_claim(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    hold = asyncio.Event()
+
+    @app.task("demo")
+    async def demo() -> None:
+        await hold.wait()
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        slots=2,
+        poll_interval=timedelta(hours=1),
+        heartbeat_interval=timedelta(hours=1),
+        shutdown_timeout=timedelta(0),
+    )
+
+    # Act
+    try:
+        claims = await _claims_until_pause(worker)
+    finally:
+        hold.set()
+
+    # Assert
+    assert claims == 1
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["run_count"] == 1
+
+
+async def test_full_claim_polls_again_before_sleeping(app: Akadze, database_url: str) -> None:
+    # Arrange
+    hold = asyncio.Event()
+
+    @app.task("demo")
+    async def demo() -> None:
+        await hold.wait()
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        slots=2,
+        poll_interval=timedelta(hours=1),
+        heartbeat_interval=timedelta(hours=1),
+        shutdown_timeout=timedelta(0),
+    )
+
+    # Act
+    try:
+        claims = await _claims_until_pause(worker)
+    finally:
+        hold.set()
+
+    # Assert
+    assert claims == 2
+    rows = await job_rows(database_url)
+    assert len(rows) == 2
+    assert rows[0]["run_count"] == 1
+    assert rows[1]["run_count"] == 1
