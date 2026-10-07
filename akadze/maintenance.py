@@ -61,8 +61,8 @@ async def rescue(engine: AsyncEngine, hooks: Hooks, *, ttl: timedelta) -> None:
         )
         for row in result.mappings():
             job = job_from_mapping(row)
-            logger.info("job %s running -> %s", job.id, job.state)
             await hooks.ran_transition(connection, job, "running", job.state)
+            logger.info("job %s running -> %s", job.id, job.state)
         await connection.execute(
             text(
                 """

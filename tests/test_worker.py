@@ -147,6 +147,25 @@ async def test_stale_run_count_discards_the_finish(app: Akadze, database_url: st
     assert row["result"] is None
 
 
+async def test_heartbeat_reregisters_a_missing_worker(app: Akadze, database_url: str) -> None:
+    # Arrange
+    worker = Worker(app)
+    await worker.register()
+    async with connection(database_url) as opened:
+        await opened.execute("DELETE FROM akadze.workers WHERE id = $1", worker.id)
+
+    # Act
+    await worker.heartbeat()
+
+    # Assert
+    async with connection(database_url) as opened:
+        count = await opened.fetchval(
+            "SELECT count(*) FROM akadze.workers WHERE id = $1",
+            worker.id,
+        )
+    assert count == 1
+
+
 async def test_heartbeat_is_written(app: Akadze, database_url: str) -> None:
     # Arrange
     worker = Worker(app)

@@ -81,10 +81,32 @@ class Worker:
 
     async def heartbeat(self) -> None:
         async with self.app.engine.begin() as connection:
-            await connection.execute(
-                text("UPDATE akadze.workers SET heartbeat_at = now() WHERE id = :id"),
+            updated = await connection.execute(
+                text(
+                    """
+                    UPDATE akadze.workers
+                    SET heartbeat_at = now()
+                    WHERE id = :id
+                    RETURNING id
+                    """
+                ),
                 {"id": self.id},
             )
+            if updated.first() is None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO akadze.workers (id, hostname, pid, queues)
+                        VALUES (:id, :hostname, :pid, CAST(:queues AS text[]))
+                        """
+                    ),
+                    {
+                        "id": self.id,
+                        "hostname": socket.gethostname(),
+                        "pid": os.getpid(),
+                        "queues": self.queues,
+                    },
+                )
 
     async def claim_available(self) -> None:
         """Claim up to the free slots. The transaction closes before a task runs."""
@@ -313,9 +335,21 @@ async def _finish(
     exc: BaseException | None,
     result: object,
 ) -> None:
-    outcome = decide(job, exc, result)
-    errors = push_error(list(job.errors), outcome)
     async with engine.begin() as connection:
+        current = await job_by_id(connection, job.id)
+        if (
+            current is None
+            or current.state != "running"
+            or current.run_count != job.run_count
+            or current.worker_id != job.worker_id
+        ):
+            logger.info("job %s finish discarded", job.id)
+            return
+        if current.cancel_requested_at is not None or current.expired:
+            exc = Cancel()
+            result = None
+        outcome = decide(current, exc, result)
+        errors = push_error(list(current.errors), outcome)
         updated = await connection.execute(
             text(
                 f"""
@@ -353,7 +387,7 @@ async def _finish(
             logger.info("job %s finish discarded", job.id)
             return
         finished = job_from_mapping(row)
-        await hooks.ran_transition(connection, finished, job.state, finished.state)
-        logger.info("job %s %s -> %s", job.id, job.state, finished.state)
+        await hooks.ran_transition(connection, finished, current.state, finished.state)
+        logger.info("job %s %s -> %s", job.id, current.state, finished.state)
 
 

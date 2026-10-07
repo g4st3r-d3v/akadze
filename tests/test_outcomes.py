@@ -152,6 +152,39 @@ async def test_cancel_from_the_task_marks_cancelled(app: Akadze, database_url: s
     assert row["attempt"] == 0
 
 
+async def test_cancel_during_a_run_discards_the_result(app: Akadze, database_url: str) -> None:
+    # Arrange
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.task("demo", max_attempts=3)
+    async def demo() -> str:
+        started.set()
+        await release.wait()
+        return "done"
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(app)
+    await worker._spawn()
+    await started.wait()
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    async with app.engine.begin() as session:
+        await request_cancel(session, int(row["id"]))
+
+    # Act
+    release.set()
+    await asyncio.gather(*worker.running)
+
+    # Assert
+    finished = await job_row(database_url, "demo")
+    assert finished is not None
+    assert finished["state"] == "cancelled"
+    assert finished["attempt"] == 0
+    assert finished["result"] is None
+
+
 async def test_cancel_requested_job_is_cancelled(app: Akadze, database_url: str) -> None:
     # Arrange
     called = False
