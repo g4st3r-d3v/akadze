@@ -62,6 +62,7 @@ class Worker:
         self.poll_interval = poll_interval
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
+        self._last_heartbeat_ok = time.monotonic()
 
     async def register(self) -> None:
         async with self.app.engine.begin() as connection:
@@ -108,6 +109,7 @@ class Worker:
                         "queues": self.queues,
                     },
                 )
+        self._last_heartbeat_ok = time.monotonic()
 
     async def claim_available(self) -> None:
         """Claim up to the free slots. The transaction closes before a task runs."""
@@ -150,11 +152,15 @@ class Worker:
 
     async def serve(self, stop: asyncio.Event) -> None:
         await self.register()
+        self._last_heartbeat_ok = time.monotonic()
         next_heartbeat = 0.0
         next_prune = 0.0
         try:
             while not stop.is_set():
                 now = time.monotonic()
+                if now - self._last_heartbeat_ok > self.heartbeat_ttl.total_seconds():
+                    logger.info("worker %s heartbeat is stale; stopping", self.id)
+                    return
                 if now >= next_heartbeat:
                     await self.heartbeat()
                     await rescue(self.app.engine, self.app.hooks, ttl=self.heartbeat_ttl)

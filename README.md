@@ -56,7 +56,7 @@ if __name__ == "__main__":
 
 Run the worker from the directory that contains `demo.py`. It loads `demo:app` from there, claims the job, runs `hello`, and sets the row to `succeeded`. Stop it with Ctrl-C. Periodic tasks run in this same process; there is no separate beat.
 
-A synchronous task runs in a thread. Stopping the worker does not stop that thread.
+If a heartbeat does not succeed within 30 seconds, the worker stops and puts unfinished jobs back on the queue. An attempt is not spent. A synchronous task runs in a thread. Stopping the worker does not stop that thread.
 
 ```bash
 python demo.py
