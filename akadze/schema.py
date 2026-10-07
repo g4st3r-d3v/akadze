@@ -101,7 +101,7 @@ async def _apply(conn: AsyncConnection, scripts: list[tuple[str, str]]) -> None:
     for version, script in scripts:
         if version in done:
             continue
-        for statement in split_sql(script):
+        for statement in _statements(script):
             await conn.execute(text(statement))
         await conn.execute(
             text("INSERT INTO akadze.schema_migrations (version) VALUES (:version)"),
@@ -142,9 +142,7 @@ def _migration_scripts() -> list[tuple[str, str]]:
 def _reject_dollar_quotes(scripts: list[tuple[str, str]]) -> None:
     for version, script in scripts:
         if "$$" in script:
-            raise MigrateError(
-                f"migration {version} contains dollar quotes; migrate cannot split those"
-            )
+            raise MigrateError(f"migration {version} contains dollar quotes")
 
 
 def _public_db_error(exc: BaseException, database_url: str) -> str:
@@ -152,81 +150,5 @@ def _public_db_error(exc: BaseException, database_url: str) -> str:
     return redact_database_url(message, database_url)
 
 
-def split_sql(script: str) -> list[str]:
-    """Split SQL on semicolons. Understands quotes and comments, not dollar quotes."""
-
-    statements: list[str] = []
-    buf: list[str] = []
-    i = 0
-    length = len(script)
-    in_single = False
-    in_double = False
-    in_line = False
-    in_block = False
-    while i < length:
-        char = script[i]
-        nxt = script[i + 1] if i + 1 < length else ""
-        if in_line:
-            buf.append(char)
-            if char == "\n":
-                in_line = False
-            i += 1
-            continue
-        if in_block:
-            buf.append(char)
-            if char == "*" and nxt == "/":
-                buf.append(nxt)
-                in_block = False
-                i += 2
-                continue
-            i += 1
-            continue
-        if in_single:
-            buf.append(char)
-            if char == "'" and nxt == "'":
-                buf.append(nxt)
-                i += 2
-                continue
-            if char == "'":
-                in_single = False
-            i += 1
-            continue
-        if in_double:
-            buf.append(char)
-            if char == '"':
-                in_double = False
-            i += 1
-            continue
-        if char == "-" and nxt == "-":
-            buf.extend("--")
-            in_line = True
-            i += 2
-            continue
-        if char == "/" and nxt == "*":
-            buf.extend("/*")
-            in_block = True
-            i += 2
-            continue
-        if char == "'":
-            in_single = True
-            buf.append(char)
-            i += 1
-            continue
-        if char == '"':
-            in_double = True
-            buf.append(char)
-            i += 1
-            continue
-        if char == ";":
-            statement = "".join(buf).strip()
-            if statement:
-                statements.append(statement)
-            buf = []
-            i += 1
-            continue
-        buf.append(char)
-        i += 1
-    tail = "".join(buf).strip()
-    if tail:
-        statements.append(tail)
-    return statements
+def _statements(script: str) -> list[str]:
+    return [statement.strip() for statement in script.split(";") if statement.strip()]

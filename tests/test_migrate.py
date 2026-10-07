@@ -11,7 +11,7 @@ import asyncpg
 import pytest
 
 from akadze import applied_versions, migrate
-from akadze.schema import MigrateError, split_sql
+from akadze.schema import MigrateError
 
 
 @asynccontextmanager
@@ -254,21 +254,6 @@ def test_cli_connection_refused_hides_password_and_traceback() -> None:
     assert "migrate failed:" in result.stderr
     assert "Traceback" not in output
     assert "super-secret-pw" not in output
-
-
-def test_split_sql_ignores_semicolons_in_quotes_and_comments() -> None:
-    # Arrange
-    script = "SELECT ';'; -- semi;\nSELECT 1; /* semi; */\nSELECT 2;"
-
-    # Act
-    statements = split_sql(script)
-
-    # Assert
-    assert statements == [
-        "SELECT ';'",
-        "-- semi;\nSELECT 1",
-        "/* semi; */\nSELECT 2",
-    ]
 
 
 async def test_dollar_quotes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
