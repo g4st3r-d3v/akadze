@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "akadze"
 version = "0.1.0"
-description = "Postgres-backed task queue with workers and optional beat (Celery-shaped, broker = PostgreSQL)."
+description = "Postgres-backed task queue. The broker is PostgreSQL."
 authors = ["g4st3r"]
 readme = "README.md"
 license = "MIT"

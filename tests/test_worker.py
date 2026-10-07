@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import timedelta
 
 from akadze import Akadze
 from akadze.worker import Worker
@@ -192,3 +194,47 @@ async def test_heartbeat_is_written(app: Akadze, database_url: str) -> None:
     assert before is not None
     assert after is not None
     assert after > before
+
+
+async def test_stale_heartbeat_returns_the_job_to_the_queue(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.task("block")
+    async def block() -> None:
+        started.set()
+        await release.wait()
+
+    async with app.engine.begin() as session:
+        await block.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        heartbeat_interval=timedelta(hours=1),
+        heartbeat_ttl=timedelta(seconds=30),
+        poll_interval=timedelta(milliseconds=10),
+    )
+    stop = asyncio.Event()
+    serve_task = asyncio.create_task(worker.serve(stop))
+
+    # Act
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        worker._last_heartbeat_ok = time.monotonic() - 31
+        await asyncio.wait_for(serve_task, timeout=2)
+    finally:
+        release.set()
+        stop.set()
+        if not serve_task.done():
+            serve_task.cancel()
+            await asyncio.gather(serve_task, return_exceptions=True)
+
+    # Assert
+    row = await job_row(database_url, "block")
+    assert row is not None
+    assert row["state"] == "queued"
+    assert row["attempt"] == 0
+    assert row["worker_id"] is None
