@@ -54,7 +54,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Run the worker from the directory that contains `demo.py`. It loads `demo:app` from there, claims the job, runs `hello`, and sets the row to `succeeded`. Stop it with Ctrl-C. Periodic tasks run in this same process; there is no separate beat.
+Run the worker from the directory that contains `demo.py`. It loads `demo:app` from there, claims the job, runs `hello`, and sets the row to `succeeded`. Stop it with Ctrl-C: the worker takes no new jobs and waits up to 10 seconds (`shutdown_timeout`) for the ones already running. Whatever is still running goes back to the queue, and an attempt is not spent. Periodic tasks run in this same process; there is no separate beat.
 
 If a heartbeat does not succeed within 30 seconds, the worker stops and puts unfinished jobs back on the queue. An attempt is not spent. A synchronous task runs in a thread. Stopping the worker does not stop that thread.
 

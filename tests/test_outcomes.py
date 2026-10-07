@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+import pytest
+
 from akadze import Akadze, Cancel, Fail, Retry, Snooze, request_cancel
 from akadze.worker import Worker
 from tests.pg import as_json, connection, job_row
@@ -263,3 +265,91 @@ async def test_shutdown_requeues_without_spending_an_attempt(
     async with connection(database_url) as opened:
         workers = await opened.fetchval("SELECT count(*) FROM akadze.workers")
     assert workers == 0
+
+
+def test_shutdown_timeout_must_not_be_negative() -> None:
+    # Act / Assert
+    with pytest.raises(ValueError, match="shutdown_timeout"):
+        Worker(object(), shutdown_timeout=timedelta(seconds=-1))
+
+
+async def test_shutdown_waits_for_a_running_job(app: Akadze, database_url: str) -> None:
+    # Arrange
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.task("demo")
+    async def demo() -> None:
+        started.set()
+        await release.wait()
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        shutdown_timeout=timedelta(seconds=2),
+        poll_interval=timedelta(milliseconds=20),
+    )
+    stop = asyncio.Event()
+    running = asyncio.create_task(worker.serve(stop))
+
+    # Act
+    await asyncio.wait_for(started.wait(), timeout=2)
+    stop.set()
+    for _ in range(200):
+        if worker._draining:
+            break
+        await asyncio.sleep(0.01)
+    assert worker._draining
+    release.set()
+    await asyncio.wait_for(running, timeout=2)
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "succeeded"
+    assert row["attempt"] == 0
+
+
+async def test_shutdown_requeues_a_job_that_outlasts_the_timeout(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.task("demo")
+    async def demo() -> None:
+        started.set()
+        await release.wait()
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        shutdown_timeout=timedelta(milliseconds=50),
+        poll_interval=timedelta(milliseconds=20),
+        heartbeat_interval=timedelta(seconds=30),
+    )
+    stop = asyncio.Event()
+    running = asyncio.create_task(worker.serve(stop))
+
+    # Act
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        stop.set()
+        await asyncio.wait_for(running, timeout=2)
+    finally:
+        release.set()
+        stop.set()
+        if not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "queued"
+    assert row["attempt"] == 0
+    assert row["worker_id"] is None
