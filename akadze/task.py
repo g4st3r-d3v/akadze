@@ -45,6 +45,7 @@ class Task(Generic[P]):
         run_at: datetime | None = None,
         priority: int | None = None,
         unique_key: str | None = None,
+        expires_at: datetime | None = None,
     ) -> BoundTask[P]:
         return BoundTask(
             self,
@@ -53,6 +54,7 @@ class Task(Generic[P]):
             run_at=run_at,
             priority=self.priority if priority is None else priority,
             unique_key=unique_key,
+            expires_at=expires_at,
         )
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any:
@@ -69,6 +71,7 @@ class BoundTask(Generic[P]):
         run_at: datetime | None,
         priority: int,
         unique_key: str | None,
+        expires_at: datetime | None,
     ) -> None:
         self._task = task
         self._session = session
@@ -76,6 +79,7 @@ class BoundTask(Generic[P]):
         self._run_at = run_at
         self._priority = priority
         self._unique_key = unique_key
+        self._expires_at = expires_at
 
     async def enqueue(self, *args: P.args, **kwargs: P.kwargs) -> None:
         if args:
@@ -91,5 +95,6 @@ class BoundTask(Generic[P]):
             unique_key=self._unique_key,
             delay=self._delay,
             run_at=self._run_at,
+            expires_at=self._expires_at,
             hooks=self._task.app.hooks,
         )

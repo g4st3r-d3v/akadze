@@ -1,10 +1,12 @@
 # akadze
 
+[![ci](https://github.com/g4st3r-d3v/akadze/actions/workflows/ci.yml/badge.svg)](https://github.com/g4st3r-d3v/akadze/actions/workflows/ci.yml)
+
 Postgres-backed task queue: enqueue work and run it in a worker. Periodic schedules run in that same process.
 
 Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP LOCKED` + lease), not Redis or RabbitMQ.
 
-**Status:** pre-alpha. Enqueue, the worker, periodic schedules, retry, and queue maintenance run on Postgres.
+**Status:** alpha. Enqueue, the worker, periodic schedules, retry, and queue maintenance run on Postgres.
 
 ## Goals
 
@@ -65,7 +67,16 @@ python demo.py
 akadze worker demo:app
 ```
 
-`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`) through `using(...)`, not as task arguments.
+`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`, `expires_at`) through `using(...)`, not as task arguments. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
+
+Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
+
+```python
+from akadze import current
+
+async with current().complete_tx() as connection:
+    await next_step.using(session=connection).enqueue()
+```
 
 To commit your own writes together with the transition to `succeeded`, take the connection from `current().complete_tx()`. If this run no longer owns the job, or the job was cancelled or has expired, the block raises and those writes roll back. An error inside the block rolls the writes back and spends an attempt.
 
@@ -78,7 +89,28 @@ async with current().complete_tx() as connection:
 
 `akadze.testing.drain(app)` runs every job that is ready now. `assert_enqueued(app, "hello", name="ada")` checks that a queued or running job has those arguments.
 
+`queue_snapshot(engine)` reads committed rows: how many jobs are in each queue and state, how long the oldest ready job has waited, and how many are running. Count outcomes in an `on_transition` hook. Do not log task arguments or results.
+
+Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
+
 Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
+
+## Release
+
+Create a tag `vX.Y.Z` that matches the version in `pyproject.toml` and push it. GitHub Actions runs the tests, publishes the wheel to PyPI, and opens a GitHub release.
+
+PyPI trusted publishing, set once on the project `akadze`:
+
+- Owner: `g4st3r-d3v`
+- Repository: `akadze`
+- Workflow: `release.yml`
+- Environment: `pypi`
+
+After that publish succeeds, an application installs the package from PyPI:
+
+```bash
+pip install akadze
+```
 
 ## Layout
 

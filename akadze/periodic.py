@@ -8,10 +8,10 @@ from typing import Any
 
 from croniter import croniter  # type: ignore[import-untyped]
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 
 from akadze.args import dump_arguments
 from akadze.enqueue import insert_job
+from akadze.exc import DuplicateJob
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ async def schedule_due(app: Any) -> None:
     for schedule in list(app.schedules):
         try:
             await _schedule_one(app, schedule)
-        except IntegrityError:
+        except DuplicateJob:
             continue
 
 
@@ -80,5 +80,6 @@ async def _schedule_one(app: Any, schedule: Schedule) -> None:
             unique_key=None if schedule.overlap else f"periodic:{schedule.name}",
             delay=None,
             run_at=None,
+            expires_at=None,
             hooks=app.hooks,
         )

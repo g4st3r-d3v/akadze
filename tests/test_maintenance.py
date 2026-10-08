@@ -74,6 +74,33 @@ async def test_stale_heartbeat_fails_when_attempts_are_exhausted(
     assert row["finished_at"] is not None
 
 
+async def test_rescue_leaves_a_finished_job_alone(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(app)
+    await worker.register()
+    await worker.step()
+    async with connection(database_url) as opened:
+        await opened.execute(
+            "UPDATE akadze.workers SET heartbeat_at = now() - interval '2 minutes' WHERE id = $1",
+            worker.id,
+        )
+
+    # Act
+    await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
+
+    # Assert
+    rows = await job_rows(database_url)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "succeeded"
+    assert rows[0]["attempt"] == 0
+
+
 async def test_pruner_deletes_old_finished_jobs_in_batches(app: Akadze, database_url: str) -> None:
     # Arrange
     async with connection(database_url) as opened:

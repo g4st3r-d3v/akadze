@@ -7,11 +7,14 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from akadze.exc import EnqueueError
+from akadze.exc import DuplicateJob, EnqueueError
 from akadze.hooks import Hooks
 from akadze.job import _COLUMNS, job_from_mapping
+
+_ACTIVE_UNIQUE_KEY = "jobs_unique_key_active_idx"
 
 _PRIORITY_MIN = -32768
 _PRIORITY_MAX = 32767
@@ -28,6 +31,7 @@ async def insert_job(
     unique_key: str | None,
     delay: timedelta | None,
     run_at: datetime | None,
+    expires_at: datetime | None,
     hooks: Hooks,
 ) -> None:
     if delay is not None and run_at is not None:
@@ -36,6 +40,8 @@ async def insert_job(
         raise EnqueueError("delay must not be negative")
     if run_at is not None and run_at.tzinfo is None:
         raise EnqueueError("run_at must be timezone-aware")
+    if expires_at is not None and expires_at.tzinfo is None:
+        raise EnqueueError("expires_at must be timezone-aware")
     if not _PRIORITY_MIN <= priority <= _PRIORITY_MAX:
         raise EnqueueError("priority must fit in smallint")
     connection = await _connection(session)
@@ -45,33 +51,39 @@ async def insert_job(
         run_at_sql = ":run_at"
     else:
         run_at_sql = "now()"
-    result = await connection.execute(
-        text(
-            f"""
-            INSERT INTO akadze.jobs (
-                task, queue, priority, state, args, max_attempts, run_at, unique_key
-            )
-            VALUES (
-                :task, :queue, :priority, 'queued', CAST(:args AS jsonb), :max_attempts,
-                {run_at_sql}, :unique_key
-            )
-            RETURNING {_COLUMNS}, false AS expired
-            """
-        ),
-        {
-            "task": task,
-            "queue": queue,
-            "priority": priority,
-            "args": json.dumps(args),
-            "max_attempts": max_attempts,
-            "delay": delay,
-            "run_at": run_at,
-            "unique_key": unique_key,
-        },
+    statement = text(
+        f"""
+        INSERT INTO akadze.jobs (
+            task, queue, priority, state, args, max_attempts, run_at, unique_key,
+            expires_at
+        )
+        VALUES (
+            :task, :queue, :priority, 'queued', CAST(:args AS jsonb), :max_attempts,
+            {run_at_sql}, :unique_key, :expires_at
+        )
+        RETURNING {_COLUMNS}, false AS expired
+        """
     )
-    row = result.mappings().one()
-    job = job_from_mapping(row)
-    await hooks.ran_enqueue(connection, job)
+    parameters = {
+        "task": task,
+        "queue": queue,
+        "priority": priority,
+        "args": json.dumps(args),
+        "max_attempts": max_attempts,
+        "delay": delay,
+        "run_at": run_at,
+        "unique_key": unique_key,
+        "expires_at": expires_at,
+    }
+    try:
+        async with connection.begin_nested():
+            result = await connection.execute(statement, parameters)
+            row = result.mappings().one()
+            await hooks.ran_enqueue(connection, job_from_mapping(row))
+    except IntegrityError as exc:
+        if _ACTIVE_UNIQUE_KEY not in str(exc.orig):
+            raise
+        raise DuplicateJob("unique_key is already active") from None
 
 
 async def request_cancel(session: AsyncConnection | AsyncSession, job_id: int) -> None:

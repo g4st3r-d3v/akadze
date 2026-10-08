@@ -5,11 +5,13 @@ description = "Postgres-backed task queue. The broker is PostgreSQL."
 authors = ["g4st3r"]
 readme = "README.md"
 license = "MIT"
+homepage = "https://github.com/g4st3r-d3v/akadze"
+repository = "https://github.com/g4st3r-d3v/akadze"
 packages = [{ include = "akadze" }]
 include = ["akadze/sql/*.sql"]
-keywords = ["postgres", "queue", "worker", "beat", "tasks"]
+keywords = ["postgres", "queue", "worker", "tasks"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.13",
