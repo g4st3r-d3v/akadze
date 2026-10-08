@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Library: Postgres task queue + worker + optional beat. No product domain. No HTTP layer.
+Library: Postgres task queue and worker. Periodic schedules run inside the worker. No product domain. No HTTP layer.
 
 ## Always
 
@@ -24,6 +24,6 @@ Library: Postgres task queue + worker + optional beat. No product domain. No HTT
 
 - Add HTTP / REST / web UI in this package (another library owns that layer)
 - Keep design notes in this repo (they live in akadze-harness)
-- Import or depend on cempa / ml-core packages
+- Import or depend on application packages
 - Put credentials in logs or traces
 - Force-push `main`
