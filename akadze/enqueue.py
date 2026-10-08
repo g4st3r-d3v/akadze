@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from akadze.exc import DuplicateJob, EnqueueError
+from akadze.exc import AkadzeError, DuplicateJob, EnqueueError
 from akadze.hooks import Hooks
 from akadze.job import _COLUMNS, job_from_mapping
 
@@ -100,6 +100,34 @@ async def request_cancel(session: AsyncConnection | AsyncSession, job_id: int) -
         ),
         {"id": job_id},
     )
+
+
+async def requeue(session: AsyncConnection | AsyncSession, job_id: int) -> None:
+    """Return a failed job to the queue. Keeps attempt, errors, and args."""
+
+    connection = await _connection(session)
+    statement = text(
+        """
+        UPDATE akadze.jobs
+        SET state = 'queued',
+            run_at = now(),
+            worker_id = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            cancel_requested_at = NULL,
+            max_attempts = greatest(max_attempts, attempt + 1)
+        WHERE id = :id AND state = 'failed'
+        """
+    )
+    try:
+        async with connection.begin_nested():
+            result = await connection.execute(statement, {"id": job_id})
+            if result.rowcount != 1:
+                raise AkadzeError("job is not failed")
+    except IntegrityError as exc:
+        if _ACTIVE_UNIQUE_KEY not in str(exc.orig):
+            raise
+        raise DuplicateJob("unique_key is already active") from None
 
 
 async def _connection(session: AsyncConnection | AsyncSession) -> AsyncConnection:
