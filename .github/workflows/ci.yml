@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: akadze
+          POSTGRES_PASSWORD: akadze
+          POSTGRES_DB: akadze
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U akadze -d akadze"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AKADZE_DATABASE_URL: postgresql://akadze:akadze@localhost:5432/akadze
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pipx install poetry==2.5.1
+      - run: poetry install
+      - run: poetry run ruff check akadze tests
+      - run: poetry run mypy
+      - run: poetry run pytest
+      - run: poetry build
+      - name: Wheel includes the schema and the type marker
+        run: |
+          python - << 'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob("dist/*.whl")
+          assert len(wheel) == 1, wheel
+          names = zipfile.ZipFile(wheel[0]).namelist()
+          assert any(name.endswith("akadze/sql/001_initial.sql") for name in names), names
+          assert any(name.endswith("akadze/py.typed") for name in names), names
+          PY

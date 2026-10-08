@@ -1,0 +1,57 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: akadze
+          POSTGRES_PASSWORD: akadze
+          POSTGRES_DB: akadze
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U akadze -d akadze"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AKADZE_DATABASE_URL: postgresql://akadze:akadze@localhost:5432/akadze
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pipx install poetry==2.5.1
+      - name: Tag matches the package version
+        run: |
+          version="$(poetry version -s)"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$version" = "$tag"
+      - run: poetry install
+      - run: poetry run ruff check akadze tests
+      - run: poetry run mypy
+      - run: poetry run pytest
+      - run: poetry build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Release ${GITHUB_REF_NAME#v} of akadze." \
+            --verify-tag
