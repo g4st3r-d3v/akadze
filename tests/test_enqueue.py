@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from akadze import Akadze, EnqueueError
+from akadze.worker import Worker
 from tests.pg import as_json, connection, job_row, job_rows
 
 
@@ -124,3 +125,57 @@ async def test_enqueue_requires_a_transaction(app: Akadze) -> None:
     async with app.engine.connect() as session:
         with pytest.raises(EnqueueError, match="transaction"):
             await demo.using(session=session).enqueue()
+
+
+async def test_duplicate_unique_key_keeps_the_first_job(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo(item: int) -> None:
+        return None
+
+    # Act / Assert
+    async with app.engine.begin() as session:
+        await demo.using(session=session, unique_key="item:1").enqueue(item=7)
+        with pytest.raises(EnqueueError, match="unique_key"):
+            await demo.using(session=session, unique_key="item:1").enqueue(item=8)
+
+    rows = await job_rows(database_url)
+    assert len(rows) == 1
+    assert as_json(rows[0]["args"]) == {"item": 7}
+
+
+async def test_expires_at_cancels_before_the_task_runs(app: Akadze, database_url: str) -> None:
+    # Arrange
+    called = False
+
+    @app.task("demo")
+    async def demo() -> None:
+        nonlocal called
+        called = True
+
+    async with app.engine.begin() as session:
+        await demo.using(
+            session=session,
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        ).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    assert called is False
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "cancelled"
+
+
+async def test_expires_at_must_be_timezone_aware(app: Akadze) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(EnqueueError, match="expires_at"):
+        async with app.engine.begin() as session:
+            await demo.using(session=session, expires_at=datetime(2026, 1, 1)).enqueue()

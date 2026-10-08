@@ -13,6 +13,10 @@ class EnqueueError(AkadzeError):
     """The job was not inserted."""
 
 
+class DuplicateJob(EnqueueError):
+    """An active job already uses this unique_key."""
+
+
 class Retry(Exception):
     """Run the job again later. This spends an attempt."""
 
