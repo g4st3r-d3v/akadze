@@ -1,4 +1,4 @@
-"""CLI entrypoints: worker, beat, migrate."""
+"""CLI entrypoints: worker, beat, migrate, jobs."""
 
 from __future__ import annotations
 
@@ -8,10 +8,23 @@ import importlib
 import os
 import signal
 import sys
+from datetime import datetime
+
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from akadze.__about__ import __version__
 from akadze.app import Akadze
-from akadze.schema import MigrateError, applied_versions, migrate, redact_database_url
+from akadze.exc import AkadzeError
+from akadze.queue import JobSummary, list_jobs
+from akadze.schema import (
+    MigrateError,
+    applied_versions,
+    async_database_url,
+    migrate,
+    redact_database_url,
+)
 from akadze.worker import Worker
 
 
@@ -27,6 +40,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("beat", help="Unused: periodic tasks run inside the worker")
     sub.add_parser("migrate", help="Apply schema migrations")
 
+    jobs = sub.add_parser("jobs", help="Inspect jobs")
+    jobs_sub = jobs.add_subparsers(dest="jobs_command")
+    jobs_list = jobs_sub.add_parser("list", help="List job summaries")
+    jobs_list.add_argument("--queue", default=None)
+    jobs_list.add_argument("--state", default=None)
+    jobs_list.add_argument("--limit", type=int, default=50)
+
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
@@ -41,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "worker":
         return _run_worker(args.app, slots=args.slots, queues=args.queues)
+    if args.command == "jobs":
+        if args.jobs_command == "list":
+            return _run_jobs_list(queue=args.queue, state=args.state, limit=args.limit)
+        jobs.print_help()
+        return 0
 
     print(f"akadze {__version__}: `{args.command}` is not implemented yet.", file=sys.stderr)
     return 1
@@ -69,6 +94,58 @@ def _run_migrate() -> int:
     else:
         print("schema up to date")
     return 0
+
+
+def _run_jobs_list(*, queue: str | None, state: str | None, limit: int) -> int:
+    database_url = os.environ.get("AKADZE_DATABASE_URL", "").strip()
+    if not database_url:
+        print("AKADZE_DATABASE_URL is not set", file=sys.stderr)
+        return 2
+    try:
+        summaries = asyncio.run(_list_jobs(database_url, queue=queue, state=state, limit=limit))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        print(f"jobs list failed: {redact_database_url(str(exc), database_url)}", file=sys.stderr)
+        return 1
+    for summary in summaries:
+        print(_format_job_line(summary))
+    return 0
+
+
+async def _list_jobs(
+    database_url: str,
+    *,
+    queue: str | None,
+    state: str | None,
+    limit: int,
+) -> tuple[JobSummary, ...]:
+    engine = _cli_engine(database_url)
+    try:
+        return await list_jobs(engine, queue=queue, state=state, limit=limit)
+    finally:
+        await engine.dispose()
+
+
+def _cli_engine(database_url: str) -> AsyncEngine:
+    return create_async_engine(
+        async_database_url(database_url),
+        poolclass=NullPool,
+        connect_args={"statement_cache_size": 0},
+    )
+
+
+def _format_job_line(job: JobSummary) -> str:
+    return (
+        f"id={job.id} task={job.task} queue={job.queue} state={job.state} "
+        f"priority={job.priority} attempt={job.attempt} max_attempts={job.max_attempts} "
+        f"run_at={_format_dt(job.run_at)} started_at={_format_dt(job.started_at)} "
+        f"finished_at={_format_dt(job.finished_at)}"
+    )
+
+
+def _format_dt(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return value.isoformat()
 
 
 def _run_worker(spec: str, *, slots: int, queues: list[str] | None) -> int:
