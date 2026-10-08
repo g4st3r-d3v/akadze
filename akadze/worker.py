@@ -357,6 +357,11 @@ async def _claim(
                   AND run_at <= now()
                   AND cancel_requested_at IS NULL
                   AND (expires_at IS NULL OR expires_at > now())
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM akadze.queue_pauses
+                      WHERE queue_pauses.queue = :queue
+                  )
                 ORDER BY priority DESC, run_at, id
                 LIMIT :limit
                 FOR UPDATE SKIP LOCKED
