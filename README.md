@@ -13,7 +13,7 @@ Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP
 - Small library, no product domain
 - Tasks, retries, lease recovery
 - Periodic cron and interval schedules run inside the worker
-- Clear Python call surface; CLI for migrate, worker, and jobs list
+- Clear Python call surface; CLI for migrate, worker, jobs, and queues
 
 ## Non-goals (for now)
 
@@ -90,6 +90,8 @@ async with current().complete_tx() as connection:
 `akadze.testing.drain(app)` runs every job that is ready now. `assert_enqueued(app, "hello", name="ada")` checks that a queued or running job has those arguments.
 
 `queue_snapshot(engine)` reads committed rows: how many jobs are in each queue and state, how long the oldest ready job has waited, and how many are running. `list_jobs(engine, queue=..., state=..., limit=50)` returns `JobSummary` rows (no args/result/errors/meta), ordered by priority, then `run_at`, then id. `akadze jobs list` prints one summary per line. Count outcomes in an `on_transition` hook. Do not log task arguments or results.
+
+`requeue(session, job_id)` returns a `failed` job to `queued` in the caller's transaction. It keeps `attempt`, `errors`, and `args`, and raises `max_attempts` when needed. `pause_queue` / `resume_queue` stop and restore claims for one queue; jobs already `running` finish. CLI: `akadze jobs requeue JOB_ID`, `akadze queues pause NAME`, `akadze queues resume NAME`.
 
 Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
 

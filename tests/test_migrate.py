@@ -55,7 +55,7 @@ async def test_migrate_creates_schema(database_url: str) -> None:
     await migrate(database_url)
 
     # Assert
-    assert await applied_versions(database_url) == ["001_initial"]
+    assert await applied_versions(database_url) == ["001_initial", "002_queue_pauses"]
     async with _connection(database_url) as connection:
         tables = await connection.fetch(
             """
@@ -89,6 +89,7 @@ async def test_migrate_creates_schema(database_url: str) -> None:
     assert [row["table_name"] for row in tables] == [
         "jobs",
         "periodic_runs",
+        "queue_pauses",
         "schema_migrations",
         "workers",
     ]
@@ -106,7 +107,7 @@ async def test_migrate_is_idempotent(database_url: str) -> None:
     await migrate(database_url)
 
     # Assert
-    assert await applied_versions(database_url) == ["001_initial"]
+    assert await applied_versions(database_url) == ["001_initial", "002_queue_pauses"]
 
 
 async def test_job_row_uses_defaults(database_url: str) -> None:
@@ -191,7 +192,7 @@ async def test_concurrent_migrate_applies_once(database_url: str) -> None:
     await asyncio.gather(migrate(database_url), migrate(database_url))
 
     # Assert
-    assert await applied_versions(database_url) == ["001_initial"]
+    assert await applied_versions(database_url) == ["001_initial", "002_queue_pauses"]
 
 
 async def test_cli_migrate_prints_applied_version(database_url: str) -> None:
@@ -205,7 +206,8 @@ async def test_cli_migrate_prints_applied_version(database_url: str) -> None:
     # Assert
     output = result.stdout + result.stderr
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "applied 001_initial"
+    assert "applied 001_initial" in result.stdout
+    assert "applied 002_queue_pauses" in result.stdout
     assert database_url not in output
 
 
