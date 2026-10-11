@@ -120,9 +120,7 @@ async def test_claim_after_success_takes_waiting_limit_key(app: Akadze, database
     await worker.shutdown()
 
 
-async def test_limit_key_without_limits_row_is_claimed(
-    app: Akadze, database_url: str
-) -> None:
+async def test_limit_key_without_limits_row_is_claimed(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("typo")
     async def typo() -> str:

@@ -618,5 +618,3 @@ async def _apply(
     await hooks.ran_transition(connection, finished, job.state, finished.state)
     logger.info("job %s %s -> %s", job.id, job.state, finished.state)
     return True
-
-
