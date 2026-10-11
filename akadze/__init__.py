@@ -4,6 +4,7 @@ from akadze.app import Akadze
 from akadze.context import current
 from akadze.enqueue import request_cancel, requeue
 from akadze.exc import AkadzeError, Cancel, DuplicateJob, EnqueueError, Fail, Retry, Snooze
+from akadze.limits import set_limit
 from akadze.queue import JobSummary, QueueSnapshot, StateCount, list_jobs, queue_snapshot
 from akadze.queues import pause_queue, resume_queue
 from akadze.schema import applied_versions, migrate
@@ -31,4 +32,5 @@ __all__ = [
     "request_cancel",
     "requeue",
     "resume_queue",
+    "set_limit",
 ]
