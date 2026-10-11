@@ -10,14 +10,16 @@ import os
 import random
 import socket
 import time
-from datetime import timedelta
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Any, TypeGuard
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from akadze.args import load_arguments
 from akadze.context import bind_run, reset_run
@@ -37,6 +39,64 @@ from akadze.outcome import decide, push_error
 from akadze.periodic import schedule_due
 
 logger = logging.getLogger("akadze")
+
+
+@dataclass(frozen=True)
+class WorkerSummary:
+    id: UUID
+    hostname: str
+    pid: int
+    queues: tuple[str, ...]
+    started_at: datetime
+    heartbeat_at: datetime
+
+
+async def list_workers(engine: AsyncEngine) -> tuple[WorkerSummary, ...]:
+    """Return registered workers. Ordered by heartbeat_at desc, then id. No mutation."""
+
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                """
+                SELECT id, hostname, pid, queues, started_at, heartbeat_at
+                FROM akadze.workers
+                ORDER BY heartbeat_at DESC, id
+                """
+            )
+        )
+        return tuple(
+            WorkerSummary(
+                id=_as_uuid(row.id),
+                hostname=str(row.hostname),
+                pid=int(row.pid),
+                queues=_as_queues(row.queues),
+                started_at=_as_datetime(row.started_at),
+                heartbeat_at=_as_datetime(row.heartbeat_at),
+            )
+            for row in rows
+        )
+
+
+def _as_uuid(value: object) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
+def _as_queues(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise TypeError("worker queues must be a sequence of strings")
+    if isinstance(value, Sequence):
+        return tuple(str(item) for item in value)
+    raise TypeError("worker queues must be a sequence of strings")
+
+
+def _as_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    raise TypeError("worker timestamp must be a datetime")
 
 
 def poll_delay(seconds: float, unit: float) -> float:

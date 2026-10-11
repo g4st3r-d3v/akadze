@@ -5,7 +5,7 @@ Suite hits **real Postgres** via `AKADZE_DATABASE_URL` (database `akadze` or `*_
 ## Style
 
 1. **AAA** — Arrange / Act / Assert; **one act** per test.
-2. **Factories** — `tests/factories.py`: `JobFactory` / `insert_job` (incl. `finished_at` / `expires_at`), `LimitFactory` / `apply_limit`, `pause`, `insert_periodic_run`, `age_worker_heartbeat`, `bump_run_count`. Prefer these over raw SQL dumps in arrange.
+2. **Factories** — `tests/factories.py`: `JobFactory` / `insert_job` (incl. `finished_at` / `expires_at`), `LimitFactory` / `apply_limit`, `pause`, `insert_periodic_run`, `insert_worker`, `age_worker_heartbeat`, `bump_run_count`. Prefer these over raw SQL dumps in arrange.
 3. **Parametrize** — states, filters, limit edges, claim fullness, task outcomes; keep cases small (no mega-tests).
 4. **pytest-mock** — only non-DB boundaries (hooks, time helpers). Never replace Postgres.
 5. **Commands vs queries** — commands return `None`; assert via follow-up queries / `tests.pg` helpers (`job_row`, `states_by_task`).
