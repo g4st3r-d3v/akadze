@@ -364,7 +364,7 @@ async def _claim(
                   )
             ),
             locked_limits AS (
-                SELECT l.key, l.max_running
+                SELECT l.key, l.max_running, l.max_starts, l."window" AS rate_window
                 FROM akadze.limits AS l
                 WHERE l.key IN (
                     SELECT DISTINCT ready.limit_key
@@ -381,6 +381,17 @@ async def _claim(
                   AND jobs.limit_key IN (SELECT locked_limits.key FROM locked_limits)
                 GROUP BY jobs.limit_key
             ),
+            starts AS (
+                SELECT
+                    marks.key AS limit_key,
+                    count(*)::int AS start_count
+                FROM akadze.limit_starts AS marks
+                INNER JOIN locked_limits
+                    ON locked_limits.key = marks.key
+                WHERE locked_limits.max_starts IS NOT NULL
+                  AND marks.started_at > now() - locked_limits.rate_window
+                GROUP BY marks.key
+            ),
             candidates AS (
                 SELECT
                     ready.id,
@@ -388,16 +399,29 @@ async def _claim(
                     ready.priority,
                     ready.run_at,
                     locked_limits.max_running,
-                    coalesce(running.running_count, 0) AS running_count
+                    locked_limits.max_starts,
+                    coalesce(running.running_count, 0) AS running_count,
+                    coalesce(starts.start_count, 0) AS start_count
                 FROM ready
                 LEFT JOIN locked_limits
                     ON locked_limits.key = ready.limit_key
                 LEFT JOIN running
                     ON running.limit_key = ready.limit_key
+                LEFT JOIN starts
+                    ON starts.limit_key = ready.limit_key
                 WHERE ready.limit_key IS NULL
                    OR (
                         locked_limits.key IS NOT NULL
-                        AND coalesce(running.running_count, 0) < locked_limits.max_running
+                        AND (
+                            locked_limits.max_running IS NULL
+                            OR coalesce(running.running_count, 0)
+                               < locked_limits.max_running
+                        )
+                        AND (
+                            locked_limits.max_starts IS NULL
+                            OR coalesce(starts.start_count, 0)
+                               < locked_limits.max_starts
+                        )
                    )
             ),
             ranked AS (
@@ -405,7 +429,9 @@ async def _claim(
                     candidates.id,
                     candidates.limit_key,
                     candidates.max_running,
+                    candidates.max_starts,
                     candidates.running_count,
+                    candidates.start_count,
                     candidates.priority,
                     candidates.run_at,
                     CASE
@@ -422,7 +448,18 @@ async def _claim(
                 SELECT ranked.id, ranked.priority, ranked.run_at
                 FROM ranked
                 WHERE ranked.limit_key IS NULL
-                   OR ranked.running_count + ranked.key_rn <= ranked.max_running
+                   OR (
+                        (
+                            ranked.max_running IS NULL
+                            OR ranked.running_count + ranked.key_rn
+                               <= ranked.max_running
+                        )
+                        AND (
+                            ranked.max_starts IS NULL
+                            OR ranked.start_count + ranked.key_rn
+                               <= ranked.max_starts
+                        )
+                   )
             ),
             picked AS (
                 SELECT job.id
@@ -432,15 +469,36 @@ async def _claim(
                 ORDER BY job.priority DESC, job.run_at, job.id
                 LIMIT :limit
                 FOR UPDATE OF job SKIP LOCKED
+            ),
+            claimed AS (
+                UPDATE akadze.jobs AS job
+                SET state = 'running',
+                    run_count = job.run_count + 1,
+                    worker_id = :worker_id,
+                    started_at = now()
+                FROM picked
+                WHERE job.id = picked.id
+                RETURNING {columns("job")}, false AS expired
+            ),
+            recorded AS (
+                INSERT INTO akadze.limit_starts (key, started_at)
+                SELECT claimed.limit_key, now()
+                FROM claimed
+                INNER JOIN akadze.limits AS limits
+                    ON limits.key = claimed.limit_key
+                WHERE claimed.limit_key IS NOT NULL
+                  AND limits.max_starts IS NOT NULL
+                RETURNING key
+            ),
+            pruned AS (
+                DELETE FROM akadze.limit_starts AS marks
+                USING akadze.limits AS limits
+                WHERE marks.key = limits.key
+                  AND limits."window" IS NOT NULL
+                  AND marks.started_at < now() - limits."window"
+                RETURNING marks.id
             )
-            UPDATE akadze.jobs AS job
-            SET state = 'running',
-                run_count = job.run_count + 1,
-                worker_id = :worker_id,
-                started_at = now()
-            FROM picked
-            WHERE job.id = picked.id
-            RETURNING {columns("job")}, false AS expired
+            SELECT * FROM claimed
             """
         ),
         {"queue": queue, "limit": limit, "worker_id": worker_id},
