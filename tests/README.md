@@ -5,8 +5,8 @@ Suite hits **real Postgres** via `AKADZE_DATABASE_URL` (database `akadze` or `*_
 ## Style
 
 1. **AAA** — Arrange / Act / Assert; **one act** per test.
-2. **Factories** — `tests/factories.py`: `JobFactory` / `insert_job`, `LimitFactory` / `apply_limit`, `pause`. Prefer these over raw SQL dumps in arrange.
-3. **Parametrize** — states, filters, limit edges; keep cases small (no mega-tests).
+2. **Factories** — `tests/factories.py`: `JobFactory` / `insert_job` (incl. `finished_at` / `expires_at`), `LimitFactory` / `apply_limit`, `pause`, `insert_periodic_run`, `age_worker_heartbeat`, `bump_run_count`. Prefer these over raw SQL dumps in arrange.
+3. **Parametrize** — states, filters, limit edges, claim fullness, task outcomes; keep cases small (no mega-tests).
 4. **pytest-mock** — only non-DB boundaries (hooks, time helpers). Never replace Postgres.
 5. **Commands vs queries** — commands return `None`; assert via follow-up queries / `tests.pg` helpers (`job_row`, `states_by_task`).
 
@@ -18,4 +18,4 @@ Suite hits **real Postgres** via `AKADZE_DATABASE_URL` (database `akadze` or `*_
 | `factories.py` | row builders + insert/apply helpers |
 | `pg.py` | read helpers against the live DB |
 
-Migrate new/verbose tests to this pattern; leave quieter files alone until they change.
+Leave quiet files alone until they change. Schema-constraint checks in `test_migrate.py` may keep raw `INSERT` when the DB default/check itself is under test.

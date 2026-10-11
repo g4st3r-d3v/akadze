@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from akadze import Akadze, AkadzeError, current
 from akadze.job import Job
 from akadze.worker import Worker
+from tests.factories import bump_run_count
 from tests.pg import connection, job_row
 
 
@@ -70,10 +71,7 @@ async def test_lost_run_rolls_back_the_write(
     async def save() -> None:
         async with current().complete_tx() as tx:
             await tx.execute(text("INSERT INTO public.akadze_test_notes (body) VALUES ('lost')"))
-            async with connection(database_url) as opened:
-                await opened.execute(
-                    "UPDATE akadze.jobs SET run_count = run_count + 1 WHERE task = 'save'"
-                )
+            await bump_run_count(app.engine, task="save")
 
     async with app.engine.begin() as session:
         await save.using(session=session).enqueue()
