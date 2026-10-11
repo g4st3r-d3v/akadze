@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
@@ -234,4 +235,233 @@ async def test_paused_queue_still_blocks_limited_jobs(
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["state"] == "queued"
+    await worker.shutdown()
+
+
+async def test_rate_limit_blocks_same_key_while_other_key_claims(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("first")
+    async def first() -> str:
+        return "first"
+
+    @app.task("second")
+    async def second() -> str:
+        return "second"
+
+    @app.task("other")
+    async def other() -> str:
+        return "other"
+
+    async with app.engine.begin() as session:
+        await set_limit(
+            session, "vendor", max_starts=1, window=timedelta(minutes=1)
+        )
+        await set_limit(
+            session, "other", max_starts=1, window=timedelta(minutes=1)
+        )
+        await first.using(session=session, limit_key="vendor").enqueue()
+        await second.using(session=session, limit_key="vendor").enqueue()
+        await other.using(session=session, limit_key="other").enqueue()
+    worker = Worker(app, slots=3)
+    await worker.register()
+
+    # Act
+    await worker.claim_available()
+
+    # Assert
+    rows = await job_rows(database_url)
+    states = {row["task"]: row["state"] for row in rows}
+    assert states == {
+        "first": "running",
+        "second": "queued",
+        "other": "running",
+    }
+    waiter = next(row for row in rows if row["task"] == "second")
+    assert waiter["run_count"] == 0
+    assert waiter["attempt"] == 0
+    await worker.shutdown()
+
+
+async def test_rate_limit_allows_claim_after_window(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("first")
+    async def first() -> str:
+        return "first"
+
+    @app.task("second")
+    async def second() -> str:
+        return "second"
+
+    async with app.engine.begin() as session:
+        await set_limit(
+            session, "vendor", max_starts=1, window=timedelta(minutes=1)
+        )
+        await first.using(session=session, limit_key="vendor").enqueue()
+        await second.using(session=session, limit_key="vendor").enqueue()
+    worker = Worker(app, slots=2)
+    await worker.register()
+    await worker.claim_available()
+    first_row = await job_row(database_url, "first")
+    second_row = await job_row(database_url, "second")
+    assert first_row is not None and first_row["state"] == "running"
+    assert second_row is not None and second_row["state"] == "queued"
+    async with connection(database_url) as opened:
+        await opened.execute(
+            """
+            UPDATE akadze.limit_starts
+            SET started_at = now() - interval '2 minutes'
+            """
+        )
+
+    # Act
+    await worker.claim_available()
+
+    # Assert
+    second_row = await job_row(database_url, "second")
+    assert second_row is not None
+    assert second_row["state"] == "running"
+    assert second_row["attempt"] == 0
+    assert second_row["run_count"] == 1
+    await worker.shutdown()
+
+
+async def test_set_limit_sets_rate_without_touching_max_running(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    async with app.engine.begin() as session:
+        await set_limit(session, "vendor", 2)
+
+    # Act
+    async with app.engine.begin() as session:
+        await set_limit(
+            session, "vendor", max_starts=1, window=timedelta(minutes=1)
+        )
+
+    # Assert
+    async with connection(database_url) as opened:
+        row = await opened.fetchrow(
+            """
+            SELECT max_running, max_starts, "window" AS rate_window
+            FROM akadze.limits
+            WHERE key = 'vendor'
+            """
+        )
+    assert dict(row) == {
+        "max_running": 2,
+        "max_starts": 1,
+        "rate_window": timedelta(minutes=1),
+    }
+
+
+async def test_set_limit_sets_max_running_without_touching_rate(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    async with app.engine.begin() as session:
+        await set_limit(
+            session, "vendor", max_starts=3, window=timedelta(seconds=30)
+        )
+
+    # Act
+    async with app.engine.begin() as session:
+        await set_limit(session, "vendor", 4)
+
+    # Assert
+    async with connection(database_url) as opened:
+        row = await opened.fetchrow(
+            """
+            SELECT max_running, max_starts, "window" AS rate_window
+            FROM akadze.limits
+            WHERE key = 'vendor'
+            """
+        )
+    assert dict(row) == {
+        "max_running": 4,
+        "max_starts": 3,
+        "rate_window": timedelta(seconds=30),
+    }
+
+
+async def test_set_limit_rejects_max_starts_below_one(app: Akadze) -> None:
+    # Arrange / Act / Assert
+    async with app.engine.begin() as session:
+        with pytest.raises(AkadzeError, match="max_starts"):
+            await set_limit(
+                session, "vendor", max_starts=0, window=timedelta(minutes=1)
+            )
+        count = await session.scalar(text("SELECT count(*) FROM akadze.limits"))
+    assert int(count or 0) == 0
+
+
+async def test_set_limit_rejects_non_positive_window(app: Akadze) -> None:
+    # Arrange / Act / Assert
+    async with app.engine.begin() as session:
+        with pytest.raises(AkadzeError, match="window"):
+            await set_limit(
+                session, "vendor", max_starts=1, window=timedelta(0)
+            )
+        count = await session.scalar(text("SELECT count(*) FROM akadze.limits"))
+    assert int(count or 0) == 0
+
+
+async def test_set_limit_rejects_rate_fields_separately(app: Akadze) -> None:
+    # Arrange / Act / Assert
+    async with app.engine.begin() as session:
+        with pytest.raises(AkadzeError, match="together"):
+            await set_limit(session, "vendor", max_starts=1)
+        with pytest.raises(AkadzeError, match="together"):
+            await set_limit(session, "vendor", window=timedelta(minutes=1))
+        count = await session.scalar(text("SELECT count(*) FROM akadze.limits"))
+    assert int(count or 0) == 0
+
+
+async def test_start_journal_prunes_marks_outside_window(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("first")
+    async def first() -> str:
+        return "first"
+
+    @app.task("second")
+    async def second() -> str:
+        return "second"
+
+    async with app.engine.begin() as session:
+        await set_limit(
+            session, "vendor", max_starts=1, window=timedelta(minutes=1)
+        )
+        await first.using(session=session, limit_key="vendor").enqueue()
+        await second.using(session=session, limit_key="vendor").enqueue()
+    worker = Worker(app, slots=2)
+    await worker.register()
+    await worker.claim_available()
+    async with connection(database_url) as opened:
+        await opened.execute(
+            """
+            UPDATE akadze.limit_starts
+            SET started_at = now() - interval '2 minutes'
+            """
+        )
+
+    # Act
+    await worker.claim_available()
+
+    # Assert
+    async with connection(database_url) as opened:
+        marks = await opened.fetch(
+            """
+            SELECT started_at > now() - interval '1 minute' AS fresh
+            FROM akadze.limit_starts
+            WHERE key = 'vendor'
+            ORDER BY id
+            """
+        )
+    assert len(marks) == 1
+    assert marks[0]["fresh"] is True
     await worker.shutdown()
