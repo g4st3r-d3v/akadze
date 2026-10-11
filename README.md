@@ -67,6 +67,21 @@ python demo.py
 akadze worker demo:app
 ```
 
+Split task modules with a thin `include`. Each module exposes `register(app)` and attaches `@app.task` / `@app.periodic` there — no package walk, no import-for-side-effect:
+
+```python
+# tasks/hello.py
+def register(app: Akadze) -> None:
+    @app.task("hello")
+    async def hello(name: str) -> str:
+        return f"hello {name}"
+
+
+# app.py
+app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
+app.include("tasks.hello")
+```
+
 `akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
 
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
