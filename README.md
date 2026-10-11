@@ -93,7 +93,7 @@ async with current().complete_tx() as connection:
 
 `requeue(session, job_id)` returns a `failed` job to `queued` in the caller's transaction. It keeps `attempt`, `errors`, and `args`, and raises `max_attempts` when needed. `pause_queue` / `resume_queue` stop and restore claims for one queue; jobs already `running` finish. CLI: `akadze jobs requeue JOB_ID`, `akadze queues pause NAME`, `akadze queues resume NAME`.
 
-`set_limit(session, key, max_running)` caps how many jobs with that `limit_key` may be `running` across the cluster. Pass the key through `using(..., limit_key=...)`; N lives only in `akadze.limits`. An empty/`None` key has no concurrency limit. A key without a limits row is never claimed (stays `queued`). This is separate from process-local `Worker.slots`.
+`set_limit(session, key, max_running=..., max_starts=..., window=...)` writes policies for a `limit_key` in `akadze.limits`. Pass the key through `using(..., limit_key=...)`; limits never live on the job row. `max_running` caps how many may be `running` cluster-wide. `max_starts` + `window` cap how many successful claims may start in that window (tracked in `akadze.limit_starts`, not by scanning `jobs`). One call may set concurrency, rate, or both; omitted fields keep their previous values. Empty/`None` `limit_key` has no limit. A key without a limits row is never claimed (stays `queued`). Concurrency and rate are separate checks. This is separate from process-local `Worker.slots`.
 
 Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
 
