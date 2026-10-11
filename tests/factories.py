@@ -166,11 +166,11 @@ async def age_worker_heartbeat(
             text(
                 """
                 UPDATE akadze.workers
-                SET heartbeat_at = now() - :age
+                SET heartbeat_at = now() - CAST(:seconds AS double precision) * interval '1 second'
                 WHERE id = CAST(:id AS uuid)
                 """
             ),
-            {"age": older_than, "id": str(worker_id)},
+            {"seconds": older_than.total_seconds(), "id": str(worker_id)},
         )
 
 
