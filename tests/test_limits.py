@@ -120,7 +120,7 @@ async def test_claim_after_success_takes_waiting_limit_key(app: Akadze, database
     await worker.shutdown()
 
 
-async def test_limit_key_without_limits_row_stays_queued(app: Akadze, database_url: str) -> None:
+async def test_limit_key_without_limits_row_is_claimed(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("typo")
     async def typo() -> str:
@@ -137,8 +137,8 @@ async def test_limit_key_without_limits_row_stays_queued(app: Akadze, database_u
     # Assert
     row = await job_row(database_url, "typo")
     assert row is not None
-    assert row["state"] == "queued"
-    assert row["run_count"] == 0
+    assert row["state"] == "running"
+    assert row["run_count"] == 1
     await worker.shutdown()
 
 
@@ -510,7 +510,7 @@ async def test_clear_limit_rejects_empty_key(app: Akadze) -> None:
             await clear_limit(session, "")
 
 
-async def test_clear_limit_keeps_fail_closed_for_jobs_with_that_key(
+async def test_clear_limit_allows_claim_for_jobs_with_that_key(
     app: Akadze, database_url: str
 ) -> None:
     # Arrange
@@ -528,10 +528,10 @@ async def test_clear_limit_keeps_fail_closed_for_jobs_with_that_key(
     await worker.register()
     await worker.claim_available()
 
-    # Assert — clearing removes the policy; missing row still blocks claim
+    # Assert — clearing removes the policy; missing row means no limit
     row = await job_row(database_url, "demo")
     assert row is not None
-    assert row["state"] == "queued"
+    assert row["state"] == "running"
     await worker.shutdown()
 
 
