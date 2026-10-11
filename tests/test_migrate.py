@@ -55,7 +55,11 @@ async def test_migrate_creates_schema(database_url: str) -> None:
     await migrate(database_url)
 
     # Assert
-    assert await applied_versions(database_url) == ["001_initial", "002_queue_pauses"]
+    assert await applied_versions(database_url) == [
+        "001_initial",
+        "002_queue_pauses",
+        "003_limits",
+    ]
     async with _connection(database_url) as connection:
         tables = await connection.fetch(
             """
@@ -79,6 +83,15 @@ async def test_migrate_creates_schema(database_url: str) -> None:
             WHERE table_schema = 'akadze' AND table_name = 'jobs' AND column_name = 'result'
             """
         )
+        limit_key_nullable = await connection.fetchval(
+            """
+            SELECT is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'akadze'
+              AND table_name = 'jobs'
+              AND column_name = 'limit_key'
+            """
+        )
         claim_index = await connection.fetchval(
             """
             SELECT indexdef
@@ -86,8 +99,16 @@ async def test_migrate_creates_schema(database_url: str) -> None:
             WHERE schemaname = 'akadze' AND indexname = 'jobs_claim_idx'
             """
         )
+        running_limit_index = await connection.fetchval(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'akadze' AND indexname = 'jobs_running_limit_key_idx'
+            """
+        )
     assert [row["table_name"] for row in tables] == [
         "jobs",
+        "limits",
         "periodic_runs",
         "queue_pauses",
         "schema_migrations",
@@ -95,8 +116,10 @@ async def test_migrate_creates_schema(database_url: str) -> None:
     ]
     assert identity == "YES"
     assert result_nullable == "YES"
+    assert limit_key_nullable == "YES"
     assert claim_index is not None
     assert "priority DESC" in claim_index
+    assert running_limit_index is not None
 
 
 async def test_migrate_is_idempotent(database_url: str) -> None:
@@ -107,7 +130,11 @@ async def test_migrate_is_idempotent(database_url: str) -> None:
     await migrate(database_url)
 
     # Assert
-    assert await applied_versions(database_url) == ["001_initial", "002_queue_pauses"]
+    assert await applied_versions(database_url) == [
+        "001_initial",
+        "002_queue_pauses",
+        "003_limits",
+    ]
 
 
 async def test_job_row_uses_defaults(database_url: str) -> None:
@@ -192,7 +219,11 @@ async def test_concurrent_migrate_applies_once(database_url: str) -> None:
     await asyncio.gather(migrate(database_url), migrate(database_url))
 
     # Assert
-    assert await applied_versions(database_url) == ["001_initial", "002_queue_pauses"]
+    assert await applied_versions(database_url) == [
+        "001_initial",
+        "002_queue_pauses",
+        "003_limits",
+    ]
 
 
 async def test_cli_migrate_prints_applied_version(database_url: str) -> None:
@@ -208,6 +239,7 @@ async def test_cli_migrate_prints_applied_version(database_url: str) -> None:
     assert result.returncode == 0, result.stderr
     assert "applied 001_initial" in result.stdout
     assert "applied 002_queue_pauses" in result.stdout
+    assert "applied 003_limits" in result.stdout
     assert database_url not in output
 
 
