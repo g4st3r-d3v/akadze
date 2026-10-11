@@ -4,8 +4,11 @@ import asyncio
 import time
 from datetime import timedelta
 
+import pytest
+
 from akadze import Akadze
 from akadze.worker import Worker, poll_delay
+from tests.factories import age_worker_heartbeat, bump_run_count
 from tests.pg import as_json, connection, job_row, job_rows
 
 
@@ -134,8 +137,7 @@ async def test_stale_run_count_discards_the_finish(app: Akadze, database_url: st
     worker = Worker(app)
     await worker._spawn()
     await started.wait()
-    async with connection(database_url) as opened:
-        await opened.execute("UPDATE akadze.jobs SET run_count = run_count + 1 WHERE task = 'demo'")
+    await bump_run_count(app.engine, task="demo")
 
     # Act
     release.set()
@@ -172,11 +174,8 @@ async def test_heartbeat_is_written(app: Akadze, database_url: str) -> None:
     # Arrange
     worker = Worker(app)
     await worker.register()
+    await age_worker_heartbeat(app.engine, worker.id, older_than=timedelta(hours=1))
     async with connection(database_url) as opened:
-        await opened.execute(
-            "UPDATE akadze.workers SET heartbeat_at = now() - interval '1 hour' WHERE id = $1",
-            worker.id,
-        )
         before = await opened.fetchval(
             "SELECT heartbeat_at FROM akadze.workers WHERE id = $1",
             worker.id,
@@ -252,39 +251,30 @@ def test_poll_delay_stays_within_half_of_the_interval() -> None:
     assert idle == 0
 
 
-async def test_claim_is_full_when_every_free_slot_is_taken(app: Akadze) -> None:
+@pytest.mark.parametrize(
+    ("slots", "job_count", "expect_full"),
+    [
+        (1, 2, True),
+        (2, 1, False),
+    ],
+    ids=["full", "slot-left"],
+)
+async def test_claim_full_flag(app: Akadze, slots: int, job_count: int, expect_full: bool) -> None:
     # Arrange
     @app.task("demo")
     async def demo() -> None:
         return None
 
     async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-        await demo.using(session=session).enqueue()
-    worker = Worker(app, slots=1)
+        for _ in range(job_count):
+            await demo.using(session=session).enqueue()
+    worker = Worker(app, slots=slots)
 
     # Act
     await worker.claim_available()
 
     # Assert
-    assert worker._last_claim_full is True
-
-
-async def test_claim_is_not_full_when_a_slot_is_left(app: Akadze) -> None:
-    # Arrange
-    @app.task("demo")
-    async def demo() -> None:
-        return None
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    worker = Worker(app, slots=2)
-
-    # Act
-    await worker.claim_available()
-
-    # Assert
-    assert worker._last_claim_full is False
+    assert worker._last_claim_full is expect_full
 
 
 async def _claims_until_pause(worker: Worker) -> int:

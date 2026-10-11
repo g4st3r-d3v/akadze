@@ -4,23 +4,15 @@ import asyncio
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import asyncpg
 import pytest
 
-from akadze import applied_versions, migrate
+from akadze import Akadze, applied_versions, migrate
 from akadze.schema import MigrateError
-
-
-@asynccontextmanager
-async def _connection(database_url: str) -> AsyncIterator[asyncpg.Connection]:
-    connection = await asyncpg.connect(database_url)
-    try:
-        yield connection
-    finally:
-        await connection.close()
+from tests.factories import insert_job
+from tests.pg import connection, job_rows
 
 
 def _cli(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -39,8 +31,8 @@ async def test_applied_versions_does_not_create_schema(database_url: str) -> Non
 
     # Assert
     assert versions == []
-    async with _connection(database_url) as connection:
-        exists = await connection.fetchval(
+    async with connection(database_url) as opened:
+        exists = await opened.fetchval(
             """
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.schemata WHERE schema_name = 'akadze'
@@ -61,8 +53,8 @@ async def test_migrate_creates_schema(database_url: str) -> None:
         "003_limits",
         "004_start_rate",
     ]
-    async with _connection(database_url) as connection:
-        tables = await connection.fetch(
+    async with connection(database_url) as opened:
+        tables = await opened.fetch(
             """
             SELECT table_name
             FROM information_schema.tables
@@ -70,21 +62,21 @@ async def test_migrate_creates_schema(database_url: str) -> None:
             ORDER BY table_name
             """
         )
-        identity = await connection.fetchval(
+        identity = await opened.fetchval(
             """
             SELECT is_identity
             FROM information_schema.columns
             WHERE table_schema = 'akadze' AND table_name = 'jobs' AND column_name = 'id'
             """
         )
-        result_nullable = await connection.fetchval(
+        result_nullable = await opened.fetchval(
             """
             SELECT is_nullable
             FROM information_schema.columns
             WHERE table_schema = 'akadze' AND table_name = 'jobs' AND column_name = 'result'
             """
         )
-        limit_key_nullable = await connection.fetchval(
+        limit_key_nullable = await opened.fetchval(
             """
             SELECT is_nullable
             FROM information_schema.columns
@@ -93,7 +85,7 @@ async def test_migrate_creates_schema(database_url: str) -> None:
               AND column_name = 'limit_key'
             """
         )
-        max_running_nullable = await connection.fetchval(
+        max_running_nullable = await opened.fetchval(
             """
             SELECT is_nullable
             FROM information_schema.columns
@@ -102,7 +94,7 @@ async def test_migrate_creates_schema(database_url: str) -> None:
               AND column_name = 'max_running'
             """
         )
-        rate_columns = await connection.fetch(
+        rate_columns = await opened.fetch(
             """
             SELECT column_name, data_type
             FROM information_schema.columns
@@ -112,21 +104,21 @@ async def test_migrate_creates_schema(database_url: str) -> None:
             ORDER BY column_name
             """
         )
-        claim_index = await connection.fetchval(
+        claim_index = await opened.fetchval(
             """
             SELECT indexdef
             FROM pg_indexes
             WHERE schemaname = 'akadze' AND indexname = 'jobs_claim_idx'
             """
         )
-        running_limit_index = await connection.fetchval(
+        running_limit_index = await opened.fetchval(
             """
             SELECT indexdef
             FROM pg_indexes
             WHERE schemaname = 'akadze' AND indexname = 'jobs_running_limit_key_idx'
             """
         )
-        start_journal_index = await connection.fetchval(
+        start_journal_index = await opened.fetchval(
             """
             SELECT indexdef
             FROM pg_indexes
@@ -174,12 +166,12 @@ async def test_migrate_is_idempotent(database_url: str) -> None:
 
 
 async def test_job_row_uses_defaults(database_url: str) -> None:
-    # Arrange
+    # Arrange — raw INSERT on purpose: asserts DB column defaults, not factory fields
     await migrate(database_url)
 
     # Act
-    async with _connection(database_url) as connection:
-        inserted = await connection.fetchrow(
+    async with connection(database_url) as opened:
+        inserted = await opened.fetchrow(
             """
             INSERT INTO akadze.jobs (task)
             VALUES ('demo')
@@ -201,53 +193,42 @@ async def test_invalid_state_is_rejected(database_url: str) -> None:
     await migrate(database_url)
 
     # Act / Assert
-    async with _connection(database_url) as connection:
+    async with connection(database_url) as opened:
         with pytest.raises(asyncpg.CheckViolationError):
-            await connection.execute(
-                "INSERT INTO akadze.jobs (task, state) VALUES ('demo', 'nope')"
-            )
+            await opened.execute("INSERT INTO akadze.jobs (task, state) VALUES ('demo', 'nope')")
 
 
 async def test_active_unique_key_rejects_a_duplicate(database_url: str) -> None:
     # Arrange
     await migrate(database_url)
-    async with _connection(database_url) as connection:
-        await connection.execute(
+    async with connection(database_url) as opened:
+        await opened.execute(
             "INSERT INTO akadze.jobs (task, unique_key) VALUES ('demo', 'vendor:1')"
         )
 
         # Act / Assert
         with pytest.raises(asyncpg.UniqueViolationError):
-            await connection.execute(
+            await opened.execute(
                 "INSERT INTO akadze.jobs (task, unique_key) VALUES ('other', 'vendor:1')"
             )
 
 
-async def test_unique_key_is_free_after_success(database_url: str) -> None:
+async def test_unique_key_is_free_after_success(app: Akadze, database_url: str) -> None:
     # Arrange
-    await migrate(database_url)
-    async with _connection(database_url) as connection:
-        await connection.execute(
-            "INSERT INTO akadze.jobs (task, unique_key) VALUES ('demo', 'vendor:1')"
-        )
-        await connection.execute(
-            """
-            UPDATE akadze.jobs
-            SET state = 'succeeded', finished_at = now()
-            WHERE unique_key = 'vendor:1'
-            """
-        )
+    await insert_job(
+        app.engine,
+        task="demo",
+        unique_key="vendor:1",
+        state="succeeded",
+        finished_at=datetime.now(UTC),
+    )
 
-        # Act
-        await connection.execute(
-            "INSERT INTO akadze.jobs (task, unique_key) VALUES ('again', 'vendor:1')"
-        )
+    # Act
+    await insert_job(app.engine, task="again", unique_key="vendor:1")
 
-        # Assert
-        count = await connection.fetchval(
-            "SELECT count(*) FROM akadze.jobs WHERE unique_key = 'vendor:1'"
-        )
-    assert count == 2
+    # Assert
+    rows = await job_rows(database_url)
+    assert len([row for row in rows if row["unique_key"] == "vendor:1"]) == 2
 
 
 async def test_concurrent_migrate_applies_once(database_url: str) -> None:

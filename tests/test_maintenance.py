@@ -1,46 +1,30 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from akadze import Akadze
 from akadze.maintenance import prune, rescue
 from akadze.worker import Worker
+from tests.factories import age_worker_heartbeat, insert_job, insert_periodic_run
 from tests.pg import connection, job_row, job_rows
 
 
-async def test_stale_heartbeat_requeues_the_job(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        return None
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    worker = Worker(app)
-    await worker.register()
-    await worker.claim_available()
-    async with connection(database_url) as opened:
-        await opened.execute(
-            "UPDATE akadze.workers SET heartbeat_at = now() - interval '2 minutes' WHERE id = $1",
-            worker.id,
-        )
-
-    # Act
-    await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "queued"
-    assert row["attempt"] == 1
-    assert row["worker_id"] is None
-    async with connection(database_url) as opened:
-        workers = await opened.fetchval("SELECT count(*) FROM akadze.workers")
-    assert workers == 0
-
-
-async def test_stale_heartbeat_fails_when_attempts_are_exhausted(
-    app: Akadze, database_url: str
+@pytest.mark.parametrize(
+    ("seed_attempt", "expected_state", "expected_attempt"),
+    [
+        (0, "queued", 1),
+        (2, "failed", 3),
+    ],
+    ids=["requeue", "exhausted"],
+)
+async def test_stale_heartbeat_rescue(
+    app: Akadze,
+    database_url: str,
+    seed_attempt: int,
+    expected_state: str,
+    expected_attempt: int,
 ) -> None:
     # Arrange
     @app.task("demo", max_attempts=3)
@@ -52,16 +36,13 @@ async def test_stale_heartbeat_fails_when_attempts_are_exhausted(
     worker = Worker(app)
     await worker.register()
     await worker.claim_available()
-    async with connection(database_url) as opened:
-        await opened.execute("UPDATE akadze.jobs SET attempt = 2 WHERE task = 'demo'")
-        await opened.execute(
-            """
-            UPDATE akadze.workers
-            SET heartbeat_at = now() - interval '2 minutes'
-            WHERE id = $1
-            """,
-            worker.id,
-        )
+    if seed_attempt:
+        async with connection(database_url) as opened:
+            await opened.execute(
+                "UPDATE akadze.jobs SET attempt = $1 WHERE task = 'demo'",
+                seed_attempt,
+            )
+    await age_worker_heartbeat(app.engine, worker.id, older_than=timedelta(minutes=2))
 
     # Act
     await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
@@ -69,9 +50,14 @@ async def test_stale_heartbeat_fails_when_attempts_are_exhausted(
     # Assert
     row = await job_row(database_url, "demo")
     assert row is not None
-    assert row["state"] == "failed"
-    assert row["attempt"] == 3
-    assert row["finished_at"] is not None
+    assert row["state"] == expected_state
+    assert row["attempt"] == expected_attempt
+    assert row["worker_id"] is None
+    if expected_state == "failed":
+        assert row["finished_at"] is not None
+    async with connection(database_url) as opened:
+        workers = await opened.fetchval("SELECT count(*) FROM akadze.workers")
+    assert workers == 0
 
 
 async def test_rescue_leaves_a_finished_job_alone(app: Akadze, database_url: str) -> None:
@@ -85,11 +71,7 @@ async def test_rescue_leaves_a_finished_job_alone(app: Akadze, database_url: str
     worker = Worker(app)
     await worker.register()
     await worker.step()
-    async with connection(database_url) as opened:
-        await opened.execute(
-            "UPDATE akadze.workers SET heartbeat_at = now() - interval '2 minutes' WHERE id = $1",
-            worker.id,
-        )
+    await age_worker_heartbeat(app.engine, worker.id, older_than=timedelta(minutes=2))
 
     # Act
     await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
@@ -103,22 +85,22 @@ async def test_rescue_leaves_a_finished_job_alone(app: Akadze, database_url: str
 
 async def test_pruner_deletes_old_finished_jobs_in_batches(app: Akadze, database_url: str) -> None:
     # Arrange
-    async with connection(database_url) as opened:
-        await opened.execute(
-            """
-            INSERT INTO akadze.jobs (task, state, finished_at)
-            VALUES
-                ('old-a', 'succeeded', now() - interval '8 days'),
-                ('old-b', 'succeeded', now() - interval '9 days'),
-                ('fresh', 'succeeded', now())
-            """
-        )
-        await opened.execute(
-            """
-            INSERT INTO akadze.periodic_runs (name, fire_at)
-            VALUES ('old', now() - interval '8 days'), ('fresh', now())
-            """
-        )
+    now = datetime.now(UTC)
+    await insert_job(
+        app.engine,
+        task="old-a",
+        state="succeeded",
+        finished_at=now - timedelta(days=8),
+    )
+    await insert_job(
+        app.engine,
+        task="old-b",
+        state="succeeded",
+        finished_at=now - timedelta(days=9),
+    )
+    await insert_job(app.engine, task="fresh", state="succeeded", finished_at=now)
+    await insert_periodic_run(app.engine, name="old", fire_at=now - timedelta(days=8))
+    await insert_periodic_run(app.engine, name="fresh", fire_at=now)
 
     # Act
     await prune(app.engine, retention=timedelta(days=7), batch=1)

@@ -1,20 +1,51 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from akadze import Akadze, Cancel, Fail, Retry, Snooze, request_cancel
 from akadze.worker import Worker
+from tests.factories import insert_job
 from tests.pg import as_json, connection, job_row
 
 
-async def test_retry_requeues_and_increments_attempt(app: Akadze, database_url: str) -> None:
+@pytest.mark.parametrize(
+    ("kind", "max_attempts", "expected_state", "expected_attempt"),
+    [
+        ("retry", 3, "queued", 1),
+        ("error", 3, "queued", 1),
+        ("error", 1, "failed", 1),
+        ("fail", 3, "failed", 1),
+        ("cancel", 3, "cancelled", 0),
+        ("snooze", 1, "queued", 0),
+    ],
+    ids=["retry", "error-retry", "last-attempt", "fail", "cancel", "snooze"],
+)
+async def test_task_outcome(
+    app: Akadze,
+    database_url: str,
+    kind: str,
+    max_attempts: int,
+    expected_state: str,
+    expected_attempt: int,
+) -> None:
     # Arrange
-    @app.task("demo", max_attempts=3)
+    def outcome() -> BaseException:
+        if kind == "retry":
+            return Retry(timedelta(seconds=30))
+        if kind == "error":
+            return RuntimeError("boom")
+        if kind == "fail":
+            return Fail("stop")
+        if kind == "cancel":
+            return Cancel("stop")
+        return Snooze(timedelta(seconds=15))
+
+    @app.task("demo", max_attempts=max_attempts)
     async def demo() -> None:
-        raise Retry(timedelta(seconds=30))
+        raise outcome()
 
     async with app.engine.begin() as session:
         await demo.using(session=session).enqueue()
@@ -25,94 +56,22 @@ async def test_retry_requeues_and_increments_attempt(app: Akadze, database_url: 
     # Assert
     row = await job_row(database_url, "demo")
     assert row is not None
-    assert row["state"] == "queued"
-    assert row["attempt"] == 1
-    assert row["worker_id"] is None
-    async with connection(database_url) as opened:
-        later = await opened.fetchval("SELECT run_at > now() FROM akadze.jobs WHERE task = 'demo'")
-    assert later is True
-
-
-async def test_error_requeues_and_increments_attempt(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        raise RuntimeError("boom")
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "queued"
-    assert row["attempt"] == 1
-    assert as_json(row["errors"])[0]["error"] == "RuntimeError"
-
-
-async def test_last_attempt_fails(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=1)
-    async def demo() -> None:
-        raise RuntimeError("boom")
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "failed"
-    assert row["attempt"] == 1
-    assert row["finished_at"] is not None
-
-
-async def test_fail_stops_without_another_try(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        raise Fail("stop")
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "failed"
-    assert row["attempt"] == 1
-
-
-async def test_snooze_does_not_spend_an_attempt(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=1)
-    async def demo() -> None:
-        raise Snooze(timedelta(seconds=15))
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "queued"
-    assert row["attempt"] == 0
-    assert row["snoozes"] == 1
-    async with connection(database_url) as opened:
-        later = await opened.fetchval("SELECT run_at > now() FROM akadze.jobs WHERE task = 'demo'")
-    assert later is True
+    assert row["state"] == expected_state
+    assert row["attempt"] == expected_attempt
+    if expected_state == "queued":
+        assert row["worker_id"] is None
+    if expected_state == "failed":
+        assert row["finished_at"] is not None
+    if kind == "snooze":
+        assert row["snoozes"] == 1
+    if kind in {"retry", "snooze"}:
+        async with connection(database_url) as opened:
+            later = await opened.fetchval(
+                "SELECT run_at > now() FROM akadze.jobs WHERE task = 'demo'"
+            )
+        assert later is True
+    if kind == "error" and expected_state == "queued":
+        assert as_json(row["errors"])[0]["error"] == "RuntimeError"
 
 
 async def test_timeout_counts_as_a_failure(app: Akadze, database_url: str) -> None:
@@ -133,25 +92,6 @@ async def test_timeout_counts_as_a_failure(app: Akadze, database_url: str) -> No
     assert row["state"] == "queued"
     assert row["attempt"] == 1
     assert as_json(row["errors"])[0]["error"] == "TimeoutError"
-
-
-async def test_cancel_from_the_task_marks_cancelled(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        raise Cancel("stop")
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "cancelled"
-    assert row["attempt"] == 0
 
 
 async def test_cancel_during_a_run_discards_the_result(app: Akadze, database_url: str) -> None:
@@ -222,12 +162,11 @@ async def test_expired_job_is_cancelled(app: Akadze, database_url: str) -> None:
         nonlocal called
         called = True
 
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    async with connection(database_url) as opened:
-        await opened.execute(
-            "UPDATE akadze.jobs SET expires_at = now() - interval '1 minute' WHERE task = 'demo'"
-        )
+    await insert_job(
+        app.engine,
+        task="demo",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
 
     # Act
     await Worker(app).step()

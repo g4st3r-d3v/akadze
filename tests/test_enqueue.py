@@ -80,20 +80,31 @@ async def test_enqueue_options_are_not_task_arguments(app: Akadze, database_url:
     assert as_json(row["args"]) == {"priority": "high-word"}
 
 
-async def test_delay_and_run_at_cannot_both_be_set(app: Akadze, database_url: str) -> None:
+@pytest.mark.parametrize(
+    ("using_kwargs", "match"),
+    [
+        (
+            {"delay": timedelta(seconds=1), "run_at": datetime(2026, 1, 1, tzinfo=UTC)},
+            "delay or run_at",
+        ),
+        ({"expires_at": datetime(2026, 1, 1)}, "expires_at"),
+    ],
+    ids=["delay-and-run-at", "naive-expires-at"],
+)
+async def test_enqueue_rejects_invalid_schedule(
+    app: Akadze,
+    using_kwargs: dict[str, object],
+    match: str,
+) -> None:
     # Arrange
     @app.task("demo")
     async def demo() -> None:
         return None
 
     # Act / Assert
-    with pytest.raises(EnqueueError, match="delay or run_at"):
+    with pytest.raises(EnqueueError, match=match):
         async with app.engine.begin() as session:
-            await demo.using(
-                session=session,
-                delay=timedelta(seconds=1),
-                run_at=datetime.now(UTC),
-            ).enqueue()
+            await demo.using(session=session, **using_kwargs).enqueue()
 
 
 async def test_delay_sets_run_at_in_the_future(app: Akadze, database_url: str) -> None:
@@ -167,15 +178,3 @@ async def test_expires_at_cancels_before_the_task_runs(app: Akadze, database_url
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["state"] == "cancelled"
-
-
-async def test_expires_at_must_be_timezone_aware(app: Akadze) -> None:
-    # Arrange
-    @app.task("demo")
-    async def demo() -> None:
-        return None
-
-    # Act / Assert
-    with pytest.raises(EnqueueError, match="expires_at"):
-        async with app.engine.begin() as session:
-            await demo.using(session=session, expires_at=datetime(2026, 1, 1)).enqueue()
