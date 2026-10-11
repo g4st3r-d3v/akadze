@@ -349,22 +349,89 @@ async def _claim(
     result = await connection.execute(
         text(
             f"""
-            WITH picked AS (
-                SELECT id
-                FROM akadze.jobs
-                WHERE state = 'queued'
-                  AND queue = :queue
-                  AND run_at <= now()
-                  AND cancel_requested_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > now())
+            WITH ready AS (
+                SELECT j.id, j.limit_key, j.priority, j.run_at
+                FROM akadze.jobs AS j
+                WHERE j.state = 'queued'
+                  AND j.queue = :queue
+                  AND j.run_at <= now()
+                  AND j.cancel_requested_at IS NULL
+                  AND (j.expires_at IS NULL OR j.expires_at > now())
                   AND NOT EXISTS (
                       SELECT 1
                       FROM akadze.queue_pauses
                       WHERE queue_pauses.queue = :queue
                   )
-                ORDER BY priority DESC, run_at, id
+            ),
+            locked_limits AS (
+                SELECT l.key, l.max_running
+                FROM akadze.limits AS l
+                WHERE l.key IN (
+                    SELECT DISTINCT ready.limit_key
+                    FROM ready
+                    WHERE ready.limit_key IS NOT NULL
+                )
+                FOR UPDATE
+            ),
+            running AS (
+                SELECT jobs.limit_key, count(*)::int AS running_count
+                FROM akadze.jobs AS jobs
+                WHERE jobs.state = 'running'
+                  AND jobs.limit_key IS NOT NULL
+                  AND jobs.limit_key IN (SELECT locked_limits.key FROM locked_limits)
+                GROUP BY jobs.limit_key
+            ),
+            candidates AS (
+                SELECT
+                    ready.id,
+                    ready.limit_key,
+                    ready.priority,
+                    ready.run_at,
+                    locked_limits.max_running,
+                    coalesce(running.running_count, 0) AS running_count
+                FROM ready
+                LEFT JOIN locked_limits
+                    ON locked_limits.key = ready.limit_key
+                LEFT JOIN running
+                    ON running.limit_key = ready.limit_key
+                WHERE ready.limit_key IS NULL
+                   OR (
+                        locked_limits.key IS NOT NULL
+                        AND coalesce(running.running_count, 0) < locked_limits.max_running
+                   )
+            ),
+            ranked AS (
+                SELECT
+                    candidates.id,
+                    candidates.limit_key,
+                    candidates.max_running,
+                    candidates.running_count,
+                    candidates.priority,
+                    candidates.run_at,
+                    CASE
+                        WHEN candidates.limit_key IS NULL THEN 0
+                        ELSE row_number() OVER (
+                            PARTITION BY candidates.limit_key
+                            ORDER BY candidates.priority DESC, candidates.run_at,
+                                     candidates.id
+                        )
+                    END AS key_rn
+                FROM candidates
+            ),
+            eligible AS (
+                SELECT ranked.id, ranked.priority, ranked.run_at
+                FROM ranked
+                WHERE ranked.limit_key IS NULL
+                   OR ranked.running_count + ranked.key_rn <= ranked.max_running
+            ),
+            picked AS (
+                SELECT job.id
+                FROM akadze.jobs AS job
+                INNER JOIN eligible ON eligible.id = job.id
+                WHERE job.state = 'queued'
+                ORDER BY job.priority DESC, job.run_at, job.id
                 LIMIT :limit
-                FOR UPDATE SKIP LOCKED
+                FOR UPDATE OF job SKIP LOCKED
             )
             UPDATE akadze.jobs AS job
             SET state = 'running',

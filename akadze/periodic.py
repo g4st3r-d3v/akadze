@@ -78,6 +78,7 @@ async def _schedule_one(app: Any, schedule: Schedule) -> None:
             max_attempts=task.max_attempts,
             args=dump_arguments(task.arguments, {}, task=task.name),
             unique_key=None if schedule.overlap else f"periodic:{schedule.name}",
+            limit_key=None,
             delay=None,
             run_at=None,
             expires_at=None,

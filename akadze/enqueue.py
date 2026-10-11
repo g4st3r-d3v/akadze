@@ -29,6 +29,7 @@ async def insert_job(
     max_attempts: int,
     args: dict[str, Any],
     unique_key: str | None,
+    limit_key: str | None,
     delay: timedelta | None,
     run_at: datetime | None,
     expires_at: datetime | None,
@@ -55,11 +56,11 @@ async def insert_job(
         f"""
         INSERT INTO akadze.jobs (
             task, queue, priority, state, args, max_attempts, run_at, unique_key,
-            expires_at
+            limit_key, expires_at
         )
         VALUES (
             :task, :queue, :priority, 'queued', CAST(:args AS jsonb), :max_attempts,
-            {run_at_sql}, :unique_key, :expires_at
+            {run_at_sql}, :unique_key, :limit_key, :expires_at
         )
         RETURNING {_COLUMNS}, false AS expired
         """
@@ -73,6 +74,7 @@ async def insert_job(
         "delay": delay,
         "run_at": run_at,
         "unique_key": unique_key,
+        "limit_key": limit_key or None,
         "expires_at": expires_at,
     }
     try:
