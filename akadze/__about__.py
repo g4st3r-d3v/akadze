@@ -1,3 +1,3 @@
 """Public version. Bump with releases; keep scaffold honest about 0.x."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
