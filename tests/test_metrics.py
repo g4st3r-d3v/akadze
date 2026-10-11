@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 
-from akadze import Akadze, pause_queue
+from akadze import Akadze
 from akadze.metrics import render_metrics
+from tests.factories import pause
 
 
-async def test_render_metrics_reports_jobs_lag_busy_and_pause(app: Akadze) -> None:
+async def test_render_metrics_reports_jobs_lag_busy_and_pause(app: Akadze, fake) -> None:
     # Arrange
-    secret = "metrics-must-not-leak-this-arg"
+    secret = fake.password(length=24)
 
     @app.task("mail-job", queue="mail")
     async def mail_job(token: str) -> str:
@@ -23,7 +24,7 @@ async def test_render_metrics_reports_jobs_lag_busy_and_pause(app: Akadze) -> No
         await mail_job.using(session=session).enqueue(token=secret)
         await mail_job.using(session=session).enqueue(token=secret)
         await default_job.using(session=session).enqueue()
-        await pause_queue(session, "mail")
+    await pause(app.engine, "mail")
 
     # Act
     text = await render_metrics(app.engine)
@@ -46,7 +47,7 @@ async def test_paused_queue_with_jobs_is_not_empty_in_metrics(app: Akadze) -> No
     async with app.engine.begin() as session:
         await demo.using(session=session).enqueue()
         await demo.using(session=session).enqueue()
-        await pause_queue(session, "mail")
+    await pause(app.engine, "mail")
 
     # Act
     text = await render_metrics(app.engine)
@@ -68,9 +69,9 @@ async def test_render_metrics_omits_lag_when_no_ready_job(app: Akadze) -> None:
     assert "akadze_queue_paused{" not in text
 
 
-async def test_render_metrics_excludes_job_argument_text(app: Akadze) -> None:
+async def test_render_metrics_excludes_job_argument_text(app: Akadze, fake) -> None:
     # Arrange
-    secret = "super-secret-payload-xyz"
+    secret = fake.pystr(min_chars=20, max_chars=32)
 
     @app.task("demo")
     async def demo(payload: str) -> str:

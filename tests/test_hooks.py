@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pytest_mock import MockerFixture
 from sqlalchemy import text
 
 from akadze import Akadze
@@ -10,15 +11,15 @@ from akadze.worker import Worker
 from tests.pg import connection, job_row, job_rows
 
 
-async def test_enqueue_hook_error_rolls_back_the_insert(app: Akadze, database_url: str) -> None:
+async def test_enqueue_hook_error_rolls_back_the_insert(
+    app: Akadze, database_url: str, mocker: MockerFixture
+) -> None:
     # Arrange
     @app.task("demo")
     async def demo() -> None:
         return None
 
-    async def reject(connection: object, job: object) -> None:
-        raise RuntimeError("enqueue hook")
-
+    reject = mocker.AsyncMock(side_effect=RuntimeError("enqueue hook"))
     app.hooks.on_enqueue.append(reject)
 
     # Act / Assert
@@ -26,6 +27,7 @@ async def test_enqueue_hook_error_rolls_back_the_insert(app: Akadze, database_ur
         async with app.engine.begin() as session:
             await demo.using(session=session).enqueue()
     assert await job_rows(database_url) == []
+    reject.assert_awaited_once()
 
 
 async def test_transition_hook_sees_the_change_and_rolls_it_back(

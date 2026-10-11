@@ -5,14 +5,13 @@ import os
 import subprocess
 import sys
 
-from akadze import Akadze, pause_queue, resume_queue
+from akadze import Akadze, resume_queue
 from akadze.worker import Worker
+from tests.factories import pause
 from tests.pg import connection, job_row
 
 
-async def test_paused_queue_is_not_claimed_other_queue_is(
-    app: Akadze, database_url: str
-) -> None:
+async def test_paused_queue_is_not_claimed_other_queue_is(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("mail-job", queue="mail")
     async def mail_job() -> str:
@@ -25,7 +24,7 @@ async def test_paused_queue_is_not_claimed_other_queue_is(
     async with app.engine.begin() as session:
         await mail_job.using(session=session).enqueue()
         await default_job.using(session=session).enqueue()
-        await pause_queue(session, "mail")
+    await pause(app.engine, "mail")
 
     # Act
     worker = Worker(app, queues=["mail", "default"])
@@ -50,7 +49,7 @@ async def test_resume_queue_restores_claim(app: Akadze, database_url: str) -> No
 
     async with app.engine.begin() as session:
         await demo.using(session=session).enqueue()
-        await pause_queue(session, "mail")
+    await pause(app.engine, "mail")
     worker = Worker(app, queues=["mail"])
     await worker.register()
     await worker.claim_available()
@@ -70,9 +69,7 @@ async def test_resume_queue_restores_claim(app: Akadze, database_url: str) -> No
     await worker.shutdown()
 
 
-async def test_running_job_finishes_while_queue_is_paused(
-    app: Akadze, database_url: str
-) -> None:
+async def test_running_job_finishes_while_queue_is_paused(app: Akadze, database_url: str) -> None:
     # Arrange
     started = asyncio.Event()
     release = asyncio.Event()
@@ -88,8 +85,7 @@ async def test_running_job_finishes_while_queue_is_paused(
     worker = Worker(app, queues=["mail"])
     await worker._spawn()
     await started.wait()
-    async with app.engine.begin() as session:
-        await pause_queue(session, "mail")
+    await pause(app.engine, "mail")
 
     # Act
     release.set()
@@ -101,16 +97,13 @@ async def test_running_job_finishes_while_queue_is_paused(
     assert finished["state"] == "succeeded"
 
 
-async def test_enqueue_into_paused_queue_stays_queued(
-    app: Akadze, database_url: str
-) -> None:
+async def test_enqueue_into_paused_queue_stays_queued(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("demo", queue="mail")
     async def demo() -> str:
         return "ok"
 
-    async with app.engine.begin() as session:
-        await pause_queue(session, "mail")
+    await pause(app.engine, "mail")
 
     # Act
     async with app.engine.begin() as session:
@@ -131,9 +124,9 @@ async def test_enqueue_into_paused_queue_stays_queued(
 
 async def test_pause_and_resume_are_idempotent(app: Akadze, database_url: str) -> None:
     # Arrange / Act
+    await pause(app.engine, "mail")
+    await pause(app.engine, "mail")
     async with app.engine.begin() as session:
-        await pause_queue(session, "mail")
-        await pause_queue(session, "mail")
         await resume_queue(session, "other")
         await resume_queue(session, "mail")
         await resume_queue(session, "mail")

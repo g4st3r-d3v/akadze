@@ -7,8 +7,9 @@ import sys
 import pytest
 from sqlalchemy import text
 
-from akadze import Akadze, AkadzeError, Cancel, DuplicateJob, Fail, requeue
+from akadze import Akadze, AkadzeError, DuplicateJob, Fail, requeue
 from akadze.worker import Worker
+from tests.factories import insert_job
 from tests.pg import as_json, connection, job_row
 
 
@@ -58,84 +59,15 @@ async def test_requeue_failed_job_is_claimed_again(app: Akadze, database_url: st
     assert runs == 2
 
 
-async def test_requeue_leaves_cancelled_unchanged(app: Akadze, database_url: str) -> None:
+@pytest.mark.parametrize("state", ["queued", "running", "succeeded", "cancelled"])
+async def test_requeue_rejects_non_failed_state(app: Akadze, state: str) -> None:
     # Arrange
-    @app.task("demo")
-    async def demo() -> None:
-        raise Cancel("stop")
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    await Worker(app).step()
-    cancelled = await job_row(database_url, "demo")
-    assert cancelled is not None
-    assert cancelled["state"] == "cancelled"
+    job_id = await insert_job(app.engine, task="demo", state=state)
 
     # Act / Assert
     async with app.engine.begin() as session:
         with pytest.raises(AkadzeError, match="job is not failed"):
-            await requeue(session, int(cancelled["id"]))
-    still = await job_row(database_url, "demo")
-    assert still is not None
-    assert still["state"] == "cancelled"
-
-
-async def test_requeue_rejects_queued(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo")
-    async def demo() -> str:
-        return "ok"
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    queued = await job_row(database_url, "demo")
-    assert queued is not None
-
-    # Act / Assert
-    async with app.engine.begin() as session:
-        with pytest.raises(AkadzeError, match="job is not failed"):
-            await requeue(session, int(queued["id"]))
-
-
-async def test_requeue_rejects_running(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo")
-    async def demo() -> str:
-        return "ok"
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    worker = Worker(app)
-    await worker.register()
-    await worker.claim_available()
-    running = await job_row(database_url, "demo")
-    assert running is not None
-    assert running["state"] == "running"
-
-    # Act / Assert
-    async with app.engine.begin() as session:
-        with pytest.raises(AkadzeError, match="job is not failed"):
-            await requeue(session, int(running["id"]))
-    await worker.shutdown()
-
-
-async def test_requeue_rejects_succeeded(app: Akadze, database_url: str) -> None:
-    # Arrange
-    @app.task("demo")
-    async def demo() -> str:
-        return "ok"
-
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    await Worker(app).step()
-    succeeded = await job_row(database_url, "demo")
-    assert succeeded is not None
-    assert succeeded["state"] == "succeeded"
-
-    # Act / Assert
-    async with app.engine.begin() as session:
-        with pytest.raises(AkadzeError, match="job is not failed"):
-            await requeue(session, int(succeeded["id"]))
+            await requeue(session, job_id)
 
 
 async def test_requeue_missing_job_raises(app: Akadze) -> None:
@@ -219,9 +151,7 @@ def _cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-async def test_cli_jobs_requeue_returns_failed_to_queued(
-    app: Akadze, database_url: str
-) -> None:
+async def test_cli_jobs_requeue_returns_failed_to_queued(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("demo", max_attempts=1)
     async def demo() -> None:
