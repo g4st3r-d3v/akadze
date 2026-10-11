@@ -1,13 +1,33 @@
+"""Shared fixtures for the akadze suite.
+
+Pattern (see also tests/README.md):
+- Arrange with factories / domain helpers (`insert_job`, `apply_limit`, `pause`).
+- Act once (one command or one query under test).
+- Assert on domain state — never mock Postgres / the SQLAlchemy engine.
+- Use pytest.mark.parametrize for state/filter/limit edges; pytest-mock only
+  for non-DB boundaries (hooks, clocks, etc.).
+"""
+
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from urllib.parse import urlparse
 
 import asyncpg
 import pytest
+from faker import Faker
 
 from akadze import Akadze, migrate
+from tests.factories import fake as shared_fake
+
+
+@pytest.fixture
+def fake() -> Iterator[Faker]:
+    """Process-wide Faker with unique cleared between tests."""
+
+    shared_fake.unique.clear()
+    yield shared_fake
 
 
 @pytest.fixture

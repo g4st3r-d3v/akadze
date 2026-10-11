@@ -27,6 +27,11 @@ async def job_rows(database_url: str) -> list[asyncpg.Record]:
         return list(await opened.fetch("SELECT * FROM akadze.jobs ORDER BY id"))
 
 
+async def states_by_task(database_url: str) -> dict[str, str]:
+    rows = await job_rows(database_url)
+    return {str(row["task"]): str(row["state"]) for row in rows}
+
+
 def as_json(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)

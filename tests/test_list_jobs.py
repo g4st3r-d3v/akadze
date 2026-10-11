@@ -13,54 +13,20 @@ from sqlalchemy.pool import NullPool
 
 from akadze import Akadze, AkadzeError, JobSummary, list_jobs, migrate
 from akadze.schema import async_database_url
-
-
-async def _insert(
-    app: Akadze,
-    *,
-    task: str,
-    queue: str = "default",
-    state: str = "queued",
-    priority: int = 0,
-    run_at: datetime | None = None,
-    attempt: int = 0,
-    max_attempts: int = 3,
-) -> int:
-    async with app.engine.begin() as connection:
-        job_id = await connection.scalar(
-            text(
-                """
-                INSERT INTO akadze.jobs (
-                    task, queue, state, priority, run_at, attempt, max_attempts, args
-                )
-                VALUES (
-                    :task, :queue, :state, :priority,
-                    COALESCE(:run_at, now()), :attempt, :max_attempts, '{}'::jsonb
-                )
-                RETURNING id
-                """
-            ),
-            {
-                "task": task,
-                "queue": queue,
-                "state": state,
-                "priority": priority,
-                "run_at": run_at,
-                "attempt": attempt,
-                "max_attempts": max_attempts,
-            },
-        )
-    assert job_id is not None
-    return int(job_id)
+from tests.factories import insert_job
 
 
 async def test_list_jobs_orders_by_priority_run_at_and_id(app: Akadze) -> None:
     # Arrange
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-    low = await _insert(app, task="low", priority=1, run_at=t0)
-    mid_late = await _insert(app, task="mid-late", priority=5, run_at=t0 + timedelta(minutes=2))
-    mid_early = await _insert(app, task="mid-early", priority=5, run_at=t0 + timedelta(minutes=1))
-    high = await _insert(app, task="high", priority=10, run_at=t0 + timedelta(hours=1))
+    low = await insert_job(app.engine, task="low", priority=1, run_at=t0)
+    mid_late = await insert_job(
+        app.engine, task="mid-late", priority=5, run_at=t0 + timedelta(minutes=2)
+    )
+    mid_early = await insert_job(
+        app.engine, task="mid-early", priority=5, run_at=t0 + timedelta(minutes=1)
+    )
+    high = await insert_job(app.engine, task="high", priority=10, run_at=t0 + timedelta(hours=1))
 
     # Act
     jobs = await list_jobs(app.engine)
@@ -70,50 +36,52 @@ async def test_list_jobs_orders_by_priority_run_at_and_id(app: Akadze) -> None:
     assert [job.task for job in jobs] == ["high", "mid-early", "mid-late", "low"]
 
 
-async def test_list_jobs_filters_by_queue(app: Akadze) -> None:
+@pytest.mark.parametrize(
+    ("filter_kwargs", "keep_task", "other_kwargs"),
+    [
+        ({"queue": "mail"}, "keep", {"task": "other", "queue": "default"}),
+        ({"state": "failed"}, "boom", {"task": "ready", "state": "queued"}),
+    ],
+    ids=["queue", "state"],
+)
+async def test_list_jobs_filters(
+    app: Akadze,
+    filter_kwargs: dict[str, str],
+    keep_task: str,
+    other_kwargs: dict[str, str],
+) -> None:
     # Arrange
-    keep = await _insert(app, task="keep", queue="mail")
-    await _insert(app, task="other", queue="default")
+    keep = await insert_job(app.engine, task=keep_task, **filter_kwargs)
+    await insert_job(app.engine, **other_kwargs)
 
     # Act
-    jobs = await list_jobs(app.engine, queue="mail")
+    jobs = await list_jobs(app.engine, **filter_kwargs)
 
     # Assert
     assert len(jobs) == 1
     assert jobs[0].id == keep
-    assert jobs[0].queue == "mail"
+    for key, value in filter_kwargs.items():
+        assert getattr(jobs[0], key) == value
 
 
-async def test_list_jobs_filters_by_state(app: Akadze) -> None:
+@pytest.mark.parametrize("limit", [1, 2])
+async def test_list_jobs_respects_limit(app: Akadze, limit: int) -> None:
     # Arrange
-    failed = await _insert(app, task="boom", state="failed")
-    await _insert(app, task="ready", state="queued")
+    first = await insert_job(app.engine, task="a", priority=3)
+    second = await insert_job(app.engine, task="b", priority=2)
+    await insert_job(app.engine, task="c", priority=1)
+    expected = [first, second][:limit]
 
     # Act
-    jobs = await list_jobs(app.engine, state="failed")
+    jobs = await list_jobs(app.engine, limit=limit)
 
     # Assert
-    assert len(jobs) == 1
-    assert jobs[0].id == failed
-    assert jobs[0].state == "failed"
+    assert [job.id for job in jobs] == expected
 
 
-async def test_list_jobs_respects_limit(app: Akadze) -> None:
+async def test_list_jobs_summary_has_no_args(app: Akadze, fake) -> None:
     # Arrange
-    first = await _insert(app, task="a", priority=3)
-    second = await _insert(app, task="b", priority=2)
-    await _insert(app, task="c", priority=1)
-
-    # Act
-    jobs = await list_jobs(app.engine, limit=2)
-
-    # Assert
-    assert [job.id for job in jobs] == [first, second]
-
-
-async def test_list_jobs_summary_has_no_args(app: Akadze) -> None:
-    # Arrange
-    await _insert(app, task="demo")
+    await insert_job(app.engine, task=fake.slug(), args={"token": fake.uuid4()})
 
     # Act
     jobs = await list_jobs(app.engine)
@@ -140,16 +108,18 @@ async def test_list_jobs_summary_has_no_args(app: Akadze) -> None:
     }
 
 
-async def test_list_jobs_rejects_limit_below_one(app: Akadze) -> None:
+@pytest.mark.parametrize(
+    ("limit", "match"),
+    [
+        (0, "limit"),
+        (1001, "limit"),
+    ],
+    ids=["below-one", "above-thousand"],
+)
+async def test_list_jobs_rejects_invalid_limit(app: Akadze, limit: int, match: str) -> None:
     # Act / Assert
-    with pytest.raises(AkadzeError, match="limit"):
-        await list_jobs(app.engine, limit=0)
-
-
-async def test_list_jobs_rejects_limit_above_thousand(app: Akadze) -> None:
-    # Act / Assert
-    with pytest.raises(AkadzeError, match="limit"):
-        await list_jobs(app.engine, limit=1001)
+    with pytest.raises(AkadzeError, match=match):
+        await list_jobs(app.engine, limit=limit)
 
 
 async def test_list_jobs_rejects_unknown_state(app: Akadze) -> None:
@@ -160,7 +130,7 @@ async def test_list_jobs_rejects_unknown_state(app: Akadze) -> None:
 
 async def test_list_jobs_does_not_mutate_rows(app: Akadze, database_url: str) -> None:
     # Arrange
-    job_id = await _insert(app, task="demo", priority=4)
+    job_id = await insert_job(app.engine, task="demo", priority=4)
     before = await _job_fingerprint(database_url, job_id)
 
     # Act
@@ -207,8 +177,8 @@ def _cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
 
 async def test_cli_jobs_list_prints_one_line_per_job(app: Akadze, database_url: str) -> None:
     # Arrange
-    first = await _insert(app, task="alpha", priority=2)
-    second = await _insert(app, task="beta", priority=1)
+    first = await insert_job(app.engine, task="alpha", priority=2)
+    second = await insert_job(app.engine, task="beta", priority=1)
     env = os.environ.copy()
     env["AKADZE_DATABASE_URL"] = database_url
 
@@ -228,9 +198,9 @@ async def test_cli_jobs_list_prints_one_line_per_job(app: Akadze, database_url: 
 
 async def test_cli_jobs_list_applies_filters(app: Akadze, database_url: str) -> None:
     # Arrange
-    keep = await _insert(app, task="mail-job", queue="mail", state="failed")
-    await _insert(app, task="other", queue="mail", state="queued")
-    await _insert(app, task="elsewhere", queue="default", state="failed")
+    keep = await insert_job(app.engine, task="mail-job", queue="mail", state="failed")
+    await insert_job(app.engine, task="other", queue="mail", state="queued")
+    await insert_job(app.engine, task="elsewhere", queue="default", state="failed")
     env = os.environ.copy()
     env["AKADZE_DATABASE_URL"] = database_url
 
