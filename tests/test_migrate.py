@@ -59,6 +59,7 @@ async def test_migrate_creates_schema(database_url: str) -> None:
         "001_initial",
         "002_queue_pauses",
         "003_limits",
+        "004_start_rate",
     ]
     async with _connection(database_url) as connection:
         tables = await connection.fetch(
@@ -92,6 +93,25 @@ async def test_migrate_creates_schema(database_url: str) -> None:
               AND column_name = 'limit_key'
             """
         )
+        max_running_nullable = await connection.fetchval(
+            """
+            SELECT is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'akadze'
+              AND table_name = 'limits'
+              AND column_name = 'max_running'
+            """
+        )
+        rate_columns = await connection.fetch(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'akadze'
+              AND table_name = 'limits'
+              AND column_name IN ('max_starts', 'window')
+            ORDER BY column_name
+            """
+        )
         claim_index = await connection.fetchval(
             """
             SELECT indexdef
@@ -106,8 +126,17 @@ async def test_migrate_creates_schema(database_url: str) -> None:
             WHERE schemaname = 'akadze' AND indexname = 'jobs_running_limit_key_idx'
             """
         )
+        start_journal_index = await connection.fetchval(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'akadze'
+              AND indexname = 'limit_starts_key_started_at_idx'
+            """
+        )
     assert [row["table_name"] for row in tables] == [
         "jobs",
+        "limit_starts",
         "limits",
         "periodic_runs",
         "queue_pauses",
@@ -117,9 +146,15 @@ async def test_migrate_creates_schema(database_url: str) -> None:
     assert identity == "YES"
     assert result_nullable == "YES"
     assert limit_key_nullable == "YES"
+    assert max_running_nullable == "YES"
+    assert [dict(row) for row in rate_columns] == [
+        {"column_name": "max_starts", "data_type": "integer"},
+        {"column_name": "window", "data_type": "interval"},
+    ]
     assert claim_index is not None
     assert "priority DESC" in claim_index
     assert running_limit_index is not None
+    assert start_journal_index is not None
 
 
 async def test_migrate_is_idempotent(database_url: str) -> None:
@@ -134,6 +169,7 @@ async def test_migrate_is_idempotent(database_url: str) -> None:
         "001_initial",
         "002_queue_pauses",
         "003_limits",
+        "004_start_rate",
     ]
 
 
@@ -223,6 +259,7 @@ async def test_concurrent_migrate_applies_once(database_url: str) -> None:
         "001_initial",
         "002_queue_pauses",
         "003_limits",
+        "004_start_rate",
     ]
 
 
@@ -240,6 +277,7 @@ async def test_cli_migrate_prints_applied_version(database_url: str) -> None:
     assert "applied 001_initial" in result.stdout
     assert "applied 002_queue_pauses" in result.stdout
     assert "applied 003_limits" in result.stdout
+    assert "applied 004_start_rate" in result.stdout
     assert database_url not in output
 
 
