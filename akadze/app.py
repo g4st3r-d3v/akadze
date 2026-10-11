@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -36,6 +37,19 @@ class Akadze:
         self.hooks = Hooks()
         self.tasks: dict[str, Task[Any]] = {}
         self.schedules: list[Schedule] = []
+
+    def include(self, *modules: str) -> None:
+        """Import each module and call its ``register(app)``.
+
+        Modules own registration (``@app.task`` / ``@app.periodic``). There is
+        no package walk and no import-for-side-effect convention.
+        """
+        for name in modules:
+            module = importlib.import_module(name)
+            register = getattr(module, "register", None)
+            if not callable(register):
+                raise AkadzeError(f"{name} has no callable register(app)")
+            register(self)
 
     def task[**P](
         self,
