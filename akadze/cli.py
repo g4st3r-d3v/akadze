@@ -1,4 +1,4 @@
-"""CLI entrypoints: worker, beat, migrate, jobs, queues."""
+"""CLI entrypoints: worker, beat, migrate, jobs, queues, limits."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import importlib
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -16,8 +16,9 @@ from sqlalchemy.pool import NullPool
 
 from akadze.__about__ import __version__
 from akadze.app import Akadze
-from akadze.enqueue import requeue
+from akadze.enqueue import request_cancel, requeue
 from akadze.exc import AkadzeError
+from akadze.limits import LimitSummary, clear_limit, list_limits
 from akadze.queue import JobSummary, list_jobs
 from akadze.queues import pause_queue, resume_queue
 from akadze.schema import (
@@ -50,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     jobs_list.add_argument("--limit", type=int, default=50)
     jobs_requeue = jobs_sub.add_parser("requeue", help="Return a failed job to the queue")
     jobs_requeue.add_argument("job_id", type=int)
+    jobs_cancel = jobs_sub.add_parser("cancel", help="Request cancel for a queued or running job")
+    jobs_cancel.add_argument("job_id", type=int)
 
     queues = sub.add_parser("queues", help="Pause and resume queues")
     queues_sub = queues.add_subparsers(dest="queues_command")
@@ -57,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
     queues_pause.add_argument("name")
     queues_resume = queues_sub.add_parser("resume", help="Allow claims from a queue again")
     queues_resume.add_argument("name")
+
+    limits = sub.add_parser("limits", help="Inspect and clear limit policies")
+    limits_sub = limits.add_subparsers(dest="limits_command")
+    limits_sub.add_parser("list", help="List limit policies")
+    limits_clear = limits_sub.add_parser("clear", help="Delete a limits row by key")
+    limits_clear.add_argument("key")
 
     args = parser.parse_args(argv)
     if args.command is None:
@@ -77,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_jobs_list(queue=args.queue, state=args.state, limit=args.limit)
         if args.jobs_command == "requeue":
             return _run_jobs_requeue(args.job_id)
+        if args.jobs_command == "cancel":
+            return _run_jobs_cancel(args.job_id)
         jobs.print_help()
         return 0
     if args.command == "queues":
@@ -85,6 +96,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.queues_command == "resume":
             return _run_queues_resume(args.name)
         queues.print_help()
+        return 0
+    if args.command == "limits":
+        if args.limits_command == "list":
+            return _run_limits_list()
+        if args.limits_command == "clear":
+            return _run_limits_clear(args.key)
+        limits.print_help()
         return 0
 
     print(f"akadze {__version__}: `{args.command}` is not implemented yet.", file=sys.stderr)
@@ -174,6 +192,72 @@ async def _requeue_job(database_url: str, job_id: int) -> None:
         await engine.dispose()
 
 
+def _run_jobs_cancel(job_id: int) -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        asyncio.run(_cancel_job(database_url, job_id))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        message = redact_database_url(str(exc), database_url)
+        print(f"jobs cancel failed: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+async def _cancel_job(database_url: str, job_id: int) -> None:
+    engine = _cli_engine(database_url)
+    try:
+        async with engine.begin() as session:
+            await request_cancel(session, job_id)
+    finally:
+        await engine.dispose()
+
+
+def _run_limits_list() -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        summaries = asyncio.run(_list_limits(database_url))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        print(f"limits list failed: {redact_database_url(str(exc), database_url)}", file=sys.stderr)
+        return 1
+    for summary in summaries:
+        print(_format_limit_line(summary))
+    return 0
+
+
+async def _list_limits(database_url: str) -> tuple[LimitSummary, ...]:
+    engine = _cli_engine(database_url)
+    try:
+        return await list_limits(engine)
+    finally:
+        await engine.dispose()
+
+
+def _run_limits_clear(key: str) -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        asyncio.run(_clear_limit(database_url, key))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        message = redact_database_url(str(exc), database_url)
+        print(f"limits clear failed: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+async def _clear_limit(database_url: str, key: str) -> None:
+    engine = _cli_engine(database_url)
+    try:
+        async with engine.begin() as session:
+            await clear_limit(session, key)
+    finally:
+        await engine.dispose()
+
+
 def _run_queues_pause(name: str) -> int:
     database_url = _require_database_url()
     if database_url is None:
@@ -235,6 +319,26 @@ def _format_job_line(job: JobSummary) -> str:
         f"run_at={_format_dt(job.run_at)} started_at={_format_dt(job.started_at)} "
         f"finished_at={_format_dt(job.finished_at)}"
     )
+
+
+def _format_limit_line(limit: LimitSummary) -> str:
+    return (
+        f"key={limit.key} max_running={_format_optional_int(limit.max_running)} "
+        f"max_starts={_format_optional_int(limit.max_starts)} "
+        f"window={_format_window(limit.window)}"
+    )
+
+
+def _format_optional_int(value: int | None) -> str:
+    if value is None:
+        return "-"
+    return str(value)
+
+
+def _format_window(value: timedelta | None) -> str:
+    if value is None:
+        return "-"
+    return str(value)
 
 
 def _format_dt(value: datetime | None) -> str:
