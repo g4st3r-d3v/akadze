@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from datetime import timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
-from akadze import Akadze, AkadzeError, set_limit
+from akadze import (
+    Akadze,
+    AkadzeError,
+    LimitSummary,
+    clear_limit,
+    list_limits,
+    set_limit,
+)
 from akadze.worker import Worker
 from tests.factories import apply_limit, pause
 from tests.pg import connection, job_row, job_rows, states_by_task
@@ -441,3 +451,182 @@ async def test_start_journal_prunes_marks_outside_window(app: Akadze, database_u
     assert len(marks) == 1
     assert marks[0]["fresh"] is True
     await worker.shutdown()
+
+
+async def test_list_limits_returns_key_and_policy_fields(app: Akadze) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="alpha", max_running=2)
+    await apply_limit(
+        app.engine,
+        key="beta",
+        max_running=None,
+        max_starts=3,
+        window=timedelta(seconds=30),
+    )
+
+    # Act
+    summaries = await list_limits(app.engine)
+
+    # Assert
+    assert summaries == (
+        LimitSummary(key="alpha", max_running=2, max_starts=None, window=None),
+        LimitSummary(
+            key="beta",
+            max_running=None,
+            max_starts=3,
+            window=timedelta(seconds=30),
+        ),
+    )
+
+
+async def test_clear_limit_deletes_row(app: Akadze, database_url: str) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="vendor", max_running=1)
+
+    # Act
+    async with app.engine.begin() as session:
+        await clear_limit(session, "vendor")
+
+    # Assert
+    assert await list_limits(app.engine) == ()
+    async with connection(database_url) as opened:
+        count = await opened.fetchval("SELECT count(*) FROM akadze.limits")
+    assert count == 0
+
+
+async def test_clear_limit_is_idempotent(app: Akadze) -> None:
+    # Arrange / Act
+    async with app.engine.begin() as session:
+        await clear_limit(session, "missing")
+
+    # Assert
+    assert await list_limits(app.engine) == ()
+
+
+async def test_clear_limit_rejects_empty_key(app: Akadze) -> None:
+    # Arrange / Act / Assert
+    async with app.engine.begin() as session:
+        with pytest.raises(AkadzeError, match="empty"):
+            await clear_limit(session, "")
+
+
+async def test_clear_limit_keeps_fail_closed_for_jobs_with_that_key(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> str:
+        return "ok"
+
+    await apply_limit(app.engine, key="vendor", max_running=1)
+    async with app.engine.begin() as session:
+        await demo.using(session=session, limit_key="vendor").enqueue()
+        await clear_limit(session, "vendor")
+
+    # Act
+    worker = Worker(app)
+    await worker.register()
+    await worker.claim_available()
+
+    # Assert — clearing removes the policy; missing row still blocks claim
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "queued"
+    await worker.shutdown()
+
+
+def _cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "akadze.cli", *argv],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+async def test_cli_limits_list_prints_one_line_per_key(app: Akadze, database_url: str) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="vendor", max_running=2)
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = database_url
+
+    # Act
+    result = _cli(env, "limits", "list")
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    assert "key=vendor max_running=2 max_starts=- window=-" in result.stdout
+    assert database_url not in result.stdout + result.stderr
+
+
+async def test_cli_limits_clear_removes_key(app: Akadze, database_url: str) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="vendor", max_running=1)
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = database_url
+
+    # Act
+    result = _cli(env, "limits", "clear", "vendor")
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    assert await list_limits(app.engine) == ()
+
+
+def test_cli_limits_list_requires_database_url() -> None:
+    # Arrange
+    env = os.environ.copy()
+    env.pop("AKADZE_DATABASE_URL", None)
+
+    # Act
+    result = _cli(env, "limits", "list")
+
+    # Assert
+    assert result.returncode == 2
+    assert "AKADZE_DATABASE_URL is not set" in result.stderr
+
+
+def test_cli_limits_clear_requires_database_url() -> None:
+    # Arrange
+    env = os.environ.copy()
+    env.pop("AKADZE_DATABASE_URL", None)
+
+    # Act
+    result = _cli(env, "limits", "clear", "vendor")
+
+    # Assert
+    assert result.returncode == 2
+    assert "AKADZE_DATABASE_URL is not set" in result.stderr
+
+
+def test_cli_limits_list_hides_password_on_failure() -> None:
+    # Arrange
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = "postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze"
+
+    # Act
+    result = _cli(env, "limits", "list")
+
+    # Assert
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "limits list failed:" in result.stderr
+    assert "super-secret-pw" not in output
+    assert "Traceback" not in output
+
+
+def test_cli_limits_clear_hides_password_on_failure() -> None:
+    # Arrange
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = "postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze"
+
+    # Act
+    result = _cli(env, "limits", "clear", "vendor")
+
+    # Assert
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "limits clear failed:" in result.stderr
+    assert "super-secret-pw" not in output
+    assert "Traceback" not in output

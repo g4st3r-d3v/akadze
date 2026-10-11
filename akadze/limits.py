@@ -1,13 +1,25 @@
-"""Cluster concurrency and start-rate limits. Commands change state and return nothing."""
+"""Cluster concurrency and start-rate limits.
+
+Commands change state and return nothing. Queries return state and change nothing.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from akadze.exc import AkadzeError
+
+
+@dataclass(frozen=True)
+class LimitSummary:
+    key: str
+    max_running: int | None
+    max_starts: int | None
+    window: timedelta | None
 
 
 async def set_limit(
@@ -69,6 +81,55 @@ async def set_limit(
     )
 
 
+async def clear_limit(session: AsyncConnection | AsyncSession, key: str) -> None:
+    """Delete the limits row for key. Idempotent if the key has no row.
+
+    Removes the policy so a typo'd or retired key is not kept forever. Jobs that
+    still carry this limit_key stay fail-closed (no limits row → never claimed).
+    """
+
+    if not key:
+        raise AkadzeError("limit key must not be empty")
+
+    connection = await _connection(session)
+    await connection.execute(
+        text("DELETE FROM akadze.limits WHERE key = :key"),
+        {"key": key},
+    )
+
+
+async def list_limits(engine: AsyncEngine) -> tuple[LimitSummary, ...]:
+    """Return every limits row. Does not mutate state."""
+
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                """
+                SELECT key, max_running, max_starts, "window"
+                FROM akadze.limits
+                ORDER BY key
+                """
+            )
+        )
+        return tuple(
+            LimitSummary(
+                key=str(row.key),
+                max_running=int(row.max_running) if row.max_running is not None else None,
+                max_starts=int(row.max_starts) if row.max_starts is not None else None,
+                window=_as_timedelta(row.window),
+            )
+            for row in rows
+        )
+
+
+def _as_timedelta(value: object) -> timedelta | None:
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        return value
+    raise TypeError("limit window must be a timedelta")
+
+
 async def _connection(session: AsyncConnection | AsyncSession) -> AsyncConnection:
     if isinstance(session, AsyncConnection):
         connection = session
@@ -77,5 +138,5 @@ async def _connection(session: AsyncConnection | AsyncSession) -> AsyncConnectio
     else:
         raise AkadzeError("session must be an AsyncConnection or AsyncSession")
     if not connection.in_transaction():
-        raise AkadzeError("set_limit must run inside the caller's transaction")
+        raise AkadzeError("limit commands must run inside the caller's transaction")
     return connection
