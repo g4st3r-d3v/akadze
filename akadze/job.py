@@ -24,6 +24,7 @@ _COLUMN_NAMES = (
     "max_attempts",
     "snoozes",
     "unique_key",
+    "limit_key",
     "worker_id",
     "errors",
     "result",
@@ -50,6 +51,7 @@ class Job:
     max_attempts: int
     snoozes: int
     unique_key: str | None
+    limit_key: str | None
     worker_id: UUID | None
     errors: list[dict[str, str]]
     result: Any
@@ -82,6 +84,7 @@ def job_from_mapping(row: RowMapping) -> Job:
         max_attempts=int(row["max_attempts"]),
         snoozes=int(row["snoozes"]),
         unique_key=None if row["unique_key"] is None else str(row["unique_key"]),
+        limit_key=None if row["limit_key"] is None else str(row["limit_key"]),
         worker_id=None if worker_id is None else UUID(str(worker_id)),
         errors=list(errors),
         result=result,
