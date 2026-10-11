@@ -84,8 +84,8 @@ async def set_limit(
 async def clear_limit(session: AsyncConnection | AsyncSession, key: str) -> None:
     """Delete the limits row for key. Idempotent if the key has no row.
 
-    Removes the policy so a typo'd or retired key is not kept forever. Jobs that
-    still carry this limit_key stay fail-closed (no limits row → never claimed).
+    Removes the policy so the key is unlimited: jobs that still carry this
+    limit_key are claimed like jobs with no limit.
     """
 
     if not key:

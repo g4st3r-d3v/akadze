@@ -409,10 +409,9 @@ async def _claim(
                     ON running.limit_key = ready.limit_key
                 LEFT JOIN starts
                     ON starts.limit_key = ready.limit_key
-                WHERE ready.limit_key IS NULL
+                WHERE locked_limits.key IS NULL
                    OR (
-                        locked_limits.key IS NOT NULL
-                        AND (
+                        (
                             locked_limits.max_running IS NULL
                             OR coalesce(running.running_count, 0)
                                < locked_limits.max_running
