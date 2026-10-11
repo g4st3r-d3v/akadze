@@ -1,4 +1,4 @@
-"""CLI entrypoints: worker, beat, migrate, jobs, queues, limits."""
+"""CLI entrypoints: worker, beat, migrate, jobs, queues, limits, workers, metrics."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from akadze.app import Akadze
 from akadze.enqueue import request_cancel, requeue
 from akadze.exc import AkadzeError
 from akadze.limits import LimitSummary, clear_limit, list_limits
+from akadze.metrics import render_metrics
 from akadze.queue import JobSummary, list_jobs
 from akadze.queues import pause_queue, resume_queue
 from akadze.schema import (
@@ -28,7 +29,7 @@ from akadze.schema import (
     migrate,
     redact_database_url,
 )
-from akadze.worker import Worker
+from akadze.worker import Worker, WorkerSummary, list_workers
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,6 +68,14 @@ def main(argv: list[str] | None = None) -> int:
     limits_clear = limits_sub.add_parser("clear", help="Delete a limits row by key")
     limits_clear.add_argument("key")
 
+    workers = sub.add_parser("workers", help="Inspect registered workers")
+    workers_sub = workers.add_subparsers(dest="workers_command")
+    workers_sub.add_parser("list", help="List workers from akadze.workers")
+
+    metrics = sub.add_parser("metrics", help="Print Prometheus exposition text")
+    metrics_sub = metrics.add_subparsers(dest="metrics_command")
+    metrics_sub.add_parser("render", help="Print Prometheus exposition text")
+
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
@@ -103,6 +112,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.limits_command == "clear":
             return _run_limits_clear(args.key)
         limits.print_help()
+        return 0
+    if args.command == "workers":
+        if args.workers_command == "list":
+            return _run_workers_list()
+        workers.print_help()
+        return 0
+    if args.command == "metrics":
+        if args.metrics_command in (None, "render"):
+            return _run_metrics()
+        metrics.print_help()
         return 0
 
     print(f"akadze {__version__}: `{args.command}` is not implemented yet.", file=sys.stderr)
@@ -258,6 +277,50 @@ async def _clear_limit(database_url: str, key: str) -> None:
         await engine.dispose()
 
 
+def _run_workers_list() -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        summaries = asyncio.run(_list_workers(database_url))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        message = redact_database_url(str(exc), database_url)
+        print(f"workers list failed: {message}", file=sys.stderr)
+        return 1
+    for summary in summaries:
+        print(_format_worker_line(summary))
+    return 0
+
+
+async def _list_workers(database_url: str) -> tuple[WorkerSummary, ...]:
+    engine = _cli_engine(database_url)
+    try:
+        return await list_workers(engine)
+    finally:
+        await engine.dispose()
+
+
+def _run_metrics() -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        text = asyncio.run(_render_metrics(database_url))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        print(f"metrics failed: {redact_database_url(str(exc), database_url)}", file=sys.stderr)
+        return 1
+    sys.stdout.write(text)
+    return 0
+
+
+async def _render_metrics(database_url: str) -> str:
+    engine = _cli_engine(database_url)
+    try:
+        return await render_metrics(engine)
+    finally:
+        await engine.dispose()
+
+
 def _run_queues_pause(name: str) -> int:
     database_url = _require_database_url()
     if database_url is None:
@@ -326,6 +389,15 @@ def _format_limit_line(limit: LimitSummary) -> str:
         f"key={limit.key} max_running={_format_optional_int(limit.max_running)} "
         f"max_starts={_format_optional_int(limit.max_starts)} "
         f"window={_format_window(limit.window)}"
+    )
+
+
+def _format_worker_line(worker: WorkerSummary) -> str:
+    queues = ",".join(worker.queues) if worker.queues else "-"
+    return (
+        f"id={worker.id} hostname={worker.hostname} pid={worker.pid} "
+        f"queues={queues} started_at={_format_dt(worker.started_at)} "
+        f"heartbeat_at={_format_dt(worker.heartbeat_at)}"
     )
 
 

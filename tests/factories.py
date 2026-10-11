@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import factory
 from faker import Faker
@@ -151,6 +152,47 @@ async def insert_periodic_run(
             ),
             {"name": name, "fire_at": fire_at},
         )
+
+
+async def insert_worker(
+    engine: AsyncEngine,
+    *,
+    worker_id: UUID | None = None,
+    hostname: str = "host",
+    pid: int = 1,
+    queues: Sequence[str] | None = None,
+    started_at: datetime | None = None,
+    heartbeat_at: datetime | None = None,
+) -> UUID:
+    """Insert a row into akadze.workers (arrange for list_workers / heartbeat tests)."""
+
+    row_id = worker_id or uuid4()
+    queue_list = list(queues) if queues is not None else ["default"]
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO akadze.workers (id, hostname, pid, queues, started_at, heartbeat_at)
+                VALUES (
+                    CAST(:id AS uuid),
+                    :hostname,
+                    :pid,
+                    CAST(:queues AS text[]),
+                    COALESCE(CAST(:started_at AS timestamptz), now()),
+                    COALESCE(CAST(:heartbeat_at AS timestamptz), now())
+                )
+                """
+            ),
+            {
+                "id": str(row_id),
+                "hostname": hostname,
+                "pid": pid,
+                "queues": queue_list,
+                "started_at": started_at,
+                "heartbeat_at": heartbeat_at,
+            },
+        )
+    return row_id
 
 
 async def age_worker_heartbeat(
