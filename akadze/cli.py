@@ -1,4 +1,4 @@
-"""CLI entrypoints: worker, beat, migrate, jobs."""
+"""CLI entrypoints: worker, beat, migrate, jobs, queues."""
 
 from __future__ import annotations
 
@@ -16,8 +16,10 @@ from sqlalchemy.pool import NullPool
 
 from akadze.__about__ import __version__
 from akadze.app import Akadze
+from akadze.enqueue import requeue
 from akadze.exc import AkadzeError
 from akadze.queue import JobSummary, list_jobs
+from akadze.queues import pause_queue, resume_queue
 from akadze.schema import (
     MigrateError,
     applied_versions,
@@ -40,12 +42,21 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("beat", help="Unused: periodic tasks run inside the worker")
     sub.add_parser("migrate", help="Apply schema migrations")
 
-    jobs = sub.add_parser("jobs", help="Inspect jobs")
+    jobs = sub.add_parser("jobs", help="Inspect and manage jobs")
     jobs_sub = jobs.add_subparsers(dest="jobs_command")
     jobs_list = jobs_sub.add_parser("list", help="List job summaries")
     jobs_list.add_argument("--queue", default=None)
     jobs_list.add_argument("--state", default=None)
     jobs_list.add_argument("--limit", type=int, default=50)
+    jobs_requeue = jobs_sub.add_parser("requeue", help="Return a failed job to the queue")
+    jobs_requeue.add_argument("job_id", type=int)
+
+    queues = sub.add_parser("queues", help="Pause and resume queues")
+    queues_sub = queues.add_subparsers(dest="queues_command")
+    queues_pause = queues_sub.add_parser("pause", help="Stop new claims from a queue")
+    queues_pause.add_argument("name")
+    queues_resume = queues_sub.add_parser("resume", help="Allow claims from a queue again")
+    queues_resume.add_argument("name")
 
     args = parser.parse_args(argv)
     if args.command is None:
@@ -64,7 +75,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "jobs":
         if args.jobs_command == "list":
             return _run_jobs_list(queue=args.queue, state=args.state, limit=args.limit)
+        if args.jobs_command == "requeue":
+            return _run_jobs_requeue(args.job_id)
         jobs.print_help()
+        return 0
+    if args.command == "queues":
+        if args.queues_command == "pause":
+            return _run_queues_pause(args.name)
+        if args.queues_command == "resume":
+            return _run_queues_resume(args.name)
+        queues.print_help()
         return 0
 
     print(f"akadze {__version__}: `{args.command}` is not implemented yet.", file=sys.stderr)
@@ -96,10 +116,17 @@ def _run_migrate() -> int:
     return 0
 
 
-def _run_jobs_list(*, queue: str | None, state: str | None, limit: int) -> int:
+def _require_database_url() -> str | None:
     database_url = os.environ.get("AKADZE_DATABASE_URL", "").strip()
     if not database_url:
         print("AKADZE_DATABASE_URL is not set", file=sys.stderr)
+        return None
+    return database_url
+
+
+def _run_jobs_list(*, queue: str | None, state: str | None, limit: int) -> int:
+    database_url = _require_database_url()
+    if database_url is None:
         return 2
     try:
         summaries = asyncio.run(_list_jobs(database_url, queue=queue, state=state, limit=limit))
@@ -121,6 +148,74 @@ async def _list_jobs(
     engine = _cli_engine(database_url)
     try:
         return await list_jobs(engine, queue=queue, state=state, limit=limit)
+    finally:
+        await engine.dispose()
+
+
+def _run_jobs_requeue(job_id: int) -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        asyncio.run(_requeue_job(database_url, job_id))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        message = redact_database_url(str(exc), database_url)
+        print(f"jobs requeue failed: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+async def _requeue_job(database_url: str, job_id: int) -> None:
+    engine = _cli_engine(database_url)
+    try:
+        async with engine.begin() as session:
+            await requeue(session, job_id)
+    finally:
+        await engine.dispose()
+
+
+def _run_queues_pause(name: str) -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        asyncio.run(_pause(database_url, name))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        message = redact_database_url(str(exc), database_url)
+        print(f"queues pause failed: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_queues_resume(name: str) -> int:
+    database_url = _require_database_url()
+    if database_url is None:
+        return 2
+    try:
+        asyncio.run(_resume(database_url, name))
+    except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
+        print(
+            f"queues resume failed: {redact_database_url(str(exc), database_url)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+async def _pause(database_url: str, queue: str) -> None:
+    engine = _cli_engine(database_url)
+    try:
+        async with engine.begin() as session:
+            await pause_queue(session, queue)
+    finally:
+        await engine.dispose()
+
+
+async def _resume(database_url: str, queue: str) -> None:
+    engine = _cli_engine(database_url)
+    try:
+        async with engine.begin() as session:
+            await resume_queue(session, queue)
     finally:
         await engine.dispose()
 
