@@ -27,7 +27,7 @@ async def set_limit(
     set_rate = max_starts is not None or window is not None
     if not set_concurrency and not set_rate:
         raise AkadzeError("set_limit requires max_running and/or max_starts with window")
-    if set_concurrency and max_running < 1:
+    if max_running is not None and max_running < 1:
         raise AkadzeError("max_running must be at least 1")
     if set_rate:
         if max_starts is None or window is None:
