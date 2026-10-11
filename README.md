@@ -67,7 +67,7 @@ python demo.py
 akadze worker demo:app
 ```
 
-`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`, `expires_at`) through `using(...)`, not as task arguments. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
+`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
 
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
 
@@ -92,6 +92,8 @@ async with current().complete_tx() as connection:
 `queue_snapshot(engine)` reads committed rows: how many jobs are in each queue and state, how long the oldest ready job has waited, and how many are running. `list_jobs(engine, queue=..., state=..., limit=50)` returns `JobSummary` rows (no args/result/errors/meta), ordered by priority, then `run_at`, then id. `akadze jobs list` prints one summary per line. Count outcomes in an `on_transition` hook. Do not log task arguments or results.
 
 `requeue(session, job_id)` returns a `failed` job to `queued` in the caller's transaction. It keeps `attempt`, `errors`, and `args`, and raises `max_attempts` when needed. `pause_queue` / `resume_queue` stop and restore claims for one queue; jobs already `running` finish. CLI: `akadze jobs requeue JOB_ID`, `akadze queues pause NAME`, `akadze queues resume NAME`.
+
+`set_limit(session, key, max_running)` caps how many jobs with that `limit_key` may be `running` across the cluster. Pass the key through `using(..., limit_key=...)`; N lives only in `akadze.limits`. An empty/`None` key has no concurrency limit. A key without a limits row is never claimed (stays `queued`). This is separate from process-local `Worker.slots`.
 
 Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
 
