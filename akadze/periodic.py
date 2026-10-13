@@ -23,6 +23,21 @@ class Schedule:
     queue: str
 
 
+@dataclass(frozen=True)
+class ScheduleSpec:
+    """Already-parsed schedule input for ``Akadze.add_schedule`` / ``add_schedules``.
+
+    The app owns YAML/TOML/JSON and duration strings; core takes cron text or a
+    ``timedelta``, not a config file.
+    """
+
+    name: str
+    cron: str | None = None
+    every: timedelta | None = None
+    overlap: bool = True
+    queue: str | None = None
+
+
 def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:
     if schedule.cron is not None:
         previous = croniter(schedule.cron, now + timedelta(seconds=1)).get_prev(datetime)

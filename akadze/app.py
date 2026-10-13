@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from akadze.exc import AkadzeError
 from akadze.hooks import Hooks
-from akadze.periodic import Schedule
+from akadze.periodic import Schedule, ScheduleSpec
 from akadze.schema import async_database_url
 from akadze.task import Task
+
+_SCHEDULE_SPEC_KEYS = frozenset({"name", "cron", "every", "overlap", "queue"})
 
 
 class Akadze:
@@ -112,6 +114,68 @@ class Akadze:
 
         return decorate
 
+    def add_schedule(
+        self,
+        name: str,
+        *,
+        cron: str | None = None,
+        every: timedelta | None = None,
+        overlap: bool = True,
+        queue: str | None = None,
+    ) -> None:
+        """Attach a periodic schedule to an already registered task.
+
+        Same cron/every/overlap/queue semantics as ``@periodic``. ``queue``
+        defaults to the task's queue. Returns nothing.
+        """
+        if name not in self.tasks:
+            raise AkadzeError(f"task {name} is not registered")
+        if (cron is None) == (every is None):
+            raise AkadzeError("schedule needs cron or every")
+        if every is not None and every <= timedelta(0):
+            raise AkadzeError("every must be positive")
+        resolved = queue if queue is not None else self.tasks[name].queue
+        self.schedules.append(
+            Schedule(name=name, cron=cron, every=every, overlap=overlap, queue=resolved)
+        )
+
+    def add_schedules(self, specs: Sequence[ScheduleSpec | Mapping[str, object]]) -> None:
+        """Attach many schedules from already-parsed specs. Returns nothing."""
+
+        for spec in specs:
+            parsed = spec if isinstance(spec, ScheduleSpec) else _schedule_spec_from_mapping(spec)
+            self.add_schedule(
+                parsed.name,
+                cron=parsed.cron,
+                every=parsed.every,
+                overlap=parsed.overlap,
+                queue=parsed.queue,
+            )
+
     async def aclose(self) -> None:
         if self._owns_engine:
             await self.engine.dispose()
+
+
+def _schedule_spec_from_mapping(raw: Mapping[str, object]) -> ScheduleSpec:
+    unknown = set(raw) - _SCHEDULE_SPEC_KEYS
+    if unknown:
+        raise AkadzeError(f"unknown schedule keys: {sorted(unknown)}")
+    if "name" not in raw:
+        raise AkadzeError("schedule needs name")
+    name = raw["name"]
+    if not isinstance(name, str) or not name:
+        raise AkadzeError("schedule name must be a non-empty str")
+    cron = raw.get("cron")
+    if cron is not None and not isinstance(cron, str):
+        raise AkadzeError("schedule cron must be a str")
+    every = raw.get("every")
+    if every is not None and not isinstance(every, timedelta):
+        raise AkadzeError("schedule every must be a timedelta")
+    overlap = raw.get("overlap", True)
+    if not isinstance(overlap, bool):
+        raise AkadzeError("schedule overlap must be a bool")
+    queue = raw.get("queue")
+    if queue is not None and not isinstance(queue, str):
+        raise AkadzeError("schedule queue must be a str")
+    return ScheduleSpec(name=name, cron=cron, every=every, overlap=overlap, queue=queue)

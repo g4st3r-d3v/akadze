@@ -82,6 +82,20 @@ app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
 app.include("tasks.hello")
 ```
 
+Schedules can also come from app config without a `@periodic` registrar per service. Parse YAML/TOML/JSON in the app, turn rows into already-parsed specs (`cron` text or `timedelta` — not duration strings), then call `add_schedule` / `add_schedules`. The task must already be in `app.tasks`; the worker tick is unchanged.
+
+```python
+from datetime import timedelta
+
+@app.task("ops.prune", queue="ops")
+async def prune() -> None:
+    ...
+
+# after include / task registration — values already parsed by the app
+app.add_schedule("ops.prune", every=timedelta(seconds=30), overlap=False)
+# or many: app.add_schedules([{"name": "ops.prune", "cron": "0 * * * *"}, ...])
+```
+
 `akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
 
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
