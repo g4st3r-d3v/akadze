@@ -43,8 +43,9 @@ class Akadze:
     def include(self, *modules: str) -> None:
         """Import each module and call its ``register(app)``.
 
-        Modules own registration (``@app.task`` / ``@app.periodic``). There is
-        no package walk and no import-for-side-effect convention.
+        Modules own registration (``@app.task`` / ``@app.periodic`` /
+        ``app.register``). There is no package walk and no
+        import-for-side-effect convention.
         """
         for name in modules:
             module = importlib.import_module(name)
@@ -52,6 +53,39 @@ class Akadze:
             if not callable(register):
                 raise AkadzeError(f"{name} has no callable register(app)")
             register(self)
+
+    def register[**P](
+        self,
+        fn: Callable[P, Any],
+        *,
+        name: str,
+        queue: str = "default",
+        max_attempts: int = 3,
+        timeout: timedelta | None = None,
+        priority: int = 0,
+    ) -> Task[P]:
+        """Bind a callable into the task registry without decorating on ``app``.
+
+        Same options and validation as ``@app.task``. Returns the registered
+        ``Task`` so the caller can enqueue it.
+        """
+        if max_attempts < 1:
+            raise AkadzeError("max_attempts must be at least 1")
+        if timeout is not None and timeout <= timedelta(0):
+            raise AkadzeError("timeout must be positive")
+        if name in self.tasks:
+            raise AkadzeError(f"task {name} is already registered")
+        registered: Task[P] = Task(
+            self,
+            name,
+            fn,
+            queue=queue,
+            max_attempts=max_attempts,
+            timeout=timeout,
+            priority=priority,
+        )
+        self.tasks[name] = registered
+        return registered
 
     def task[**P](
         self,
@@ -62,25 +96,15 @@ class Akadze:
         timeout: timedelta | None = None,
         priority: int = 0,
     ) -> Callable[[Callable[P, Any]], Task[P]]:
-        if max_attempts < 1:
-            raise AkadzeError("max_attempts must be at least 1")
-        if timeout is not None and timeout <= timedelta(0):
-            raise AkadzeError("timeout must be positive")
-
         def decorate(fn: Callable[P, Any]) -> Task[P]:
-            if name in self.tasks:
-                raise AkadzeError(f"task {name} is already registered")
-            registered: Task[P] = Task(
-                self,
-                name,
+            return self.register(
                 fn,
+                name=name,
                 queue=queue,
                 max_attempts=max_attempts,
                 timeout=timeout,
                 priority=priority,
             )
-            self.tasks[name] = registered
-            return registered
 
         return decorate
 

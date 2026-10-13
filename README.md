@@ -67,7 +67,7 @@ python demo.py
 akadze worker demo:app
 ```
 
-Split task modules with a thin `include`. Each module exposes `register(app)` and attaches `@app.task` / `@app.periodic` there — no package walk, no import-for-side-effect:
+Split task modules with a thin `include`. Each module exposes `register(app)` and attaches `@app.task` / `@app.periodic` / `app.register` there — no package walk, no import-for-side-effect:
 
 ```python
 # tasks/hello.py
@@ -81,6 +81,29 @@ def register(app: Akadze) -> None:
 app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
 app.include("tasks.hello")
 ```
+
+When dependencies exist before the live `Akadze` instance, declare a plain callable and bind it later. Canonical DI path: factory builds the app → `include` modules → `app.register` unbound callables (closures over deps) → optional `add_schedules`. No global app bind and no Celery `shared_task`.
+
+```python
+# tasks/hello.py — no app, no decorator
+async def hello(name: str, *, runner: Runner) -> str:
+    return await runner.greet(name)
+
+
+# bootstrap after assemble_runtime / DI
+def create_app(deps: Deps) -> Akadze:
+    app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
+    app.include("tasks.ops")
+
+    async def _hello(name: str) -> str:
+        return await hello(name, runner=deps.runner)
+
+    app.register(_hello, name="hello")  # same options as @app.task
+    # app.add_schedules([...])  # optional, after tasks exist
+    return app
+```
+
+`app.register(fn, *, name, queue=..., max_attempts=..., timeout=..., priority=...)` is equivalent to `@app.task(...)` without decorating on a live instance. It returns the registered `Task`.
 
 Schedules can also come from app config without a `@periodic` registrar per service. Parse YAML/TOML/JSON in the app, turn rows into already-parsed specs (`cron` text or `timedelta` — not duration strings), then call `add_schedule` / `add_schedules`. The task must already be in `app.tasks`; the worker tick is unchanged.
 
