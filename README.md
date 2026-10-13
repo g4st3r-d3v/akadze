@@ -6,7 +6,7 @@ Postgres-backed task queue: enqueue work and run it in a worker. Periodic schedu
 
 Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP LOCKED` + lease), not Redis or RabbitMQ.
 
-**Status:** alpha. Enqueue, the worker, periodic schedules, retry, and queue maintenance run on Postgres.
+**Status:** alpha (0.3.x). Public API may still change between minors until 1.0; after Beta the surface freezes. Bugs → [Issues](https://github.com/g4st3r-d3v/akadze/issues).
 
 ## Goals
 
@@ -113,6 +113,20 @@ async with current().complete_tx() as connection:
 Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
 
 Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
+
+## Celery migration
+
+Primitives map to familiar Celery habits; there is no Redis/Rabbit broker and no canvas/chord.
+
+| Habit | akadze |
+|---|---|
+| Dedup / task id | `using(..., unique_key=...)` → `DuplicateJob` if still active |
+| Concurrency / rate | `using(..., limit_key=...)` + `set_limit` / `clear_limit` |
+| Follow-up in the same tx | `async with current().complete_tx() as connection:` then `using(session=connection).enqueue(...)` |
+| Countdown / “sleep and retry” | `raise Snooze(timedelta(...))` (does not spend an attempt); or `using(..., delay=... \| run_at=...)` |
+| Beat | `@app.periodic` / schedules inside the worker (`akadze beat` is a stub) |
+
+Enqueue options go through `using(...)`, not as task kwargs. No `.get()` / result backend; count outcomes in hooks or ops queries.
 
 ## Release
 
