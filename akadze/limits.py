@@ -85,7 +85,8 @@ async def clear_limit(session: AsyncConnection | AsyncSession, key: str) -> None
     """Delete the limits row for key. Idempotent if the key has no row.
 
     Removes the policy so the key is unlimited: jobs that still carry this
-    limit_key are claimed like jobs with no limit.
+    limit_key are claimed like jobs with no limit. Start marks for the key go
+    too, since the claim only prunes marks of keys that still have a row.
     """
 
     if not key:
@@ -94,6 +95,10 @@ async def clear_limit(session: AsyncConnection | AsyncSession, key: str) -> None
     connection = await _connection(session)
     await connection.execute(
         text("DELETE FROM akadze.limits WHERE key = :key"),
+        {"key": key},
+    )
+    await connection.execute(
+        text("DELETE FROM akadze.limit_starts WHERE key = :key"),
         {"key": key},
     )
 

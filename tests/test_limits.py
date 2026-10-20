@@ -494,6 +494,23 @@ async def test_clear_limit_deletes_row(app: Akadze, database_url: str) -> None:
     assert count == 0
 
 
+async def test_clear_limit_deletes_start_marks_for_the_key(app: Akadze, database_url: str) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="vendor", max_starts=1, window=timedelta(hours=1))
+    await apply_limit(app.engine, key="other", max_starts=1, window=timedelta(hours=1))
+    async with connection(database_url) as opened:
+        await opened.execute("INSERT INTO akadze.limit_starts (key) VALUES ('vendor'), ('other')")
+
+    # Act
+    async with app.engine.begin() as session:
+        await clear_limit(session, "vendor")
+
+    # Assert
+    async with connection(database_url) as opened:
+        keys = await opened.fetch("SELECT key FROM akadze.limit_starts ORDER BY key")
+    assert [row["key"] for row in keys] == ["other"]
+
+
 async def test_clear_limit_is_idempotent(app: Akadze) -> None:
     # Arrange / Act
     async with app.engine.begin() as session:
