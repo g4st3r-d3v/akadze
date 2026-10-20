@@ -35,7 +35,7 @@ from akadze.job import (
     running_jobs,
 )
 from akadze.maintenance import prune, rescue
-from akadze.outcome import decide, push_error
+from akadze.outcome import BackoffPolicy, decide, push_error
 from akadze.periodic import schedule_due
 
 logger = logging.getLogger("akadze")
@@ -313,6 +313,8 @@ class Worker:
             await _complete_open_run(connection, self.app.hooks, job)
 
         _run, token = bind_run(self.app.engine, finish)
+        registered = self.app.tasks.get(job.task)
+        policy = None if registered is None else registered.backoff
         try:
             try:
                 result = await self._invoke(job)
@@ -324,11 +326,11 @@ class Worker:
                 if _run.done:
                     logger.info("job %s raised after complete_tx", job.id)
                     return
-                await _finish(self.app.engine, self.app.hooks, job, exc, None)
+                await _finish(self.app.engine, self.app.hooks, job, exc, None, policy)
             else:
                 if _run.done:
                     return
-                await _finish(self.app.engine, self.app.hooks, job, None, result)
+                await _finish(self.app.engine, self.app.hooks, job, None, result, policy)
         finally:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
@@ -617,13 +619,14 @@ async def _finish(
     job: Job,
     exc: BaseException | None,
     result: object,
+    policy: BackoffPolicy | None = None,
 ) -> None:
     async with engine.begin() as connection:
         current = await job_by_id(connection, job.id)
         if not _owns(current, job):
             logger.info("job %s finish discarded", job.id)
             return
-        if not await _apply(connection, hooks, current, exc, result):
+        if not await _apply(connection, hooks, current, exc, result, policy):
             logger.info("job %s finish discarded", job.id)
 
 
@@ -633,11 +636,12 @@ async def _apply(
     job: Job,
     exc: BaseException | None,
     result: object,
+    policy: BackoffPolicy | None = None,
 ) -> bool:
     if job.cancel_requested_at is not None or job.expired:
         exc = Cancel()
         result = None
-    outcome = decide(job, exc, result)
+    outcome = decide(job, exc, result, policy)
     errors = push_error(list(job.errors), outcome)
     updated = await connection.execute(
         text(

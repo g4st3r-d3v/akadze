@@ -39,7 +39,9 @@ async def rescue(engine: AsyncEngine, hooks: Hooks, *, ttl: timedelta) -> None:
                         WHEN job.attempt + 1 >= job.max_attempts THEN 'failed'
                         ELSE 'queued'
                     END,
-                    run_at = now(),
+                    run_at = now() + make_interval(
+                        secs => least(power(2, job.attempt), 300) * (0.5 + random() * 0.5)
+                    ),
                     worker_id = NULL,
                     started_at = NULL,
                     finished_at = CASE

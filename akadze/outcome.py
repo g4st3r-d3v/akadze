@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import random
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -11,6 +14,12 @@ from akadze.exc import Cancel, Fail, Retry, Snooze
 from akadze.job import Job
 
 _MAX_BACKOFF_SECONDS = 300
+_JITTER_FLOOR = 0.5
+_MAX_POLICY_DELAY = timedelta(days=365)
+
+logger = logging.getLogger("akadze.outcome")
+
+BackoffPolicy = Callable[[int], timedelta]
 _MESSAGE_LIMIT = 500
 _PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
 
@@ -26,7 +35,12 @@ class Outcome:
     result_json: str | None
 
 
-def decide(job: Job, exc: BaseException | None, result: object) -> Outcome:
+def decide(
+    job: Job,
+    exc: BaseException | None,
+    result: object,
+    policy: BackoffPolicy | None = None,
+) -> Outcome:
     if isinstance(exc, Cancel):
         return _terminal(job, "cancelled", job.attempt, "Cancel", exc)
     if isinstance(exc, Snooze):
@@ -34,7 +48,7 @@ def decide(job: Job, exc: BaseException | None, result: object) -> Outcome:
             state="queued",
             attempt=job.attempt,
             snoozes=job.snoozes + 1,
-            delay=_positive(exc.delay),
+            delay=_non_negative(exc.delay),
             error_type=None,
             error_message=None,
             result_json=None,
@@ -50,7 +64,7 @@ def decide(job: Job, exc: BaseException | None, result: object) -> Outcome:
             state="queued",
             attempt=attempt,
             snoozes=job.snoozes,
-            delay=backoff(attempt, delay),
+            delay=backoff(attempt, delay, policy),
             error_type=type(exc).__name__,
             error_message=_message(exc),
             result_json=None,
@@ -73,7 +87,7 @@ def decide(job: Job, exc: BaseException | None, result: object) -> Outcome:
             "queued",
             attempt,
             job.snoozes,
-            backoff(attempt, None),
+            backoff(attempt, None, policy),
             "ResultNotJson",
             "result is not JSON",
             None,
@@ -81,11 +95,34 @@ def decide(job: Job, exc: BaseException | None, result: object) -> Outcome:
     return Outcome("succeeded", job.attempt, job.snoozes, None, None, None, result_json)
 
 
-def backoff(attempt: int, explicit: timedelta | None) -> timedelta:
+def backoff(
+    attempt: int,
+    explicit: timedelta | None,
+    policy: BackoffPolicy | None = None,
+    jitter: Callable[[], float] = random.random,
+) -> timedelta:
+    """Delay before the next attempt: Retry's delay, else the task policy, else the default.
+
+    The default is exponential (``2^(attempt-1)`` seconds, capped) with jitter in
+    ``[50 %, 100 %]`` so a batch that failed together does not retry together.
+    A policy that raises or returns a non-timedelta falls back to the default.
+    Delays are clamped to ``[0, 365 days]``. ``jitter`` returns a float in
+    ``[0, 1)``; tests pass a fixed one.
+    """
+
     if explicit is not None:
-        return _positive(explicit)
+        return _non_negative(explicit)
+    if policy is not None:
+        try:
+            chosen = policy(attempt)
+        except Exception:
+            logger.warning("backoff policy raised; using the default", exc_info=True)
+        else:
+            if isinstance(chosen, timedelta):
+                return min(_non_negative(chosen), _MAX_POLICY_DELAY)
+            logger.warning("backoff policy returned %s; using the default", type(chosen).__name__)
     seconds = min(2 ** (attempt - 1), _MAX_BACKOFF_SECONDS)
-    return timedelta(seconds=seconds)
+    return timedelta(seconds=seconds * (_JITTER_FLOOR + (1 - _JITTER_FLOOR) * jitter()))
 
 
 def push_error(errors: list[dict[str, str]], outcome: Outcome) -> list[dict[str, str]]:
@@ -99,10 +136,8 @@ def _terminal(job: Job, state: str, attempt: int, error_type: str, exc: BaseExce
     return Outcome(state, attempt, job.snoozes, None, error_type, _message(exc), None)
 
 
-def _positive(delay: timedelta) -> timedelta:
-    if delay < timedelta(0):
-        raise ValueError("delay must not be negative")
-    return delay
+def _non_negative(delay: timedelta) -> timedelta:
+    return max(delay, timedelta(0))
 
 
 def _message(exc: BaseException) -> str:

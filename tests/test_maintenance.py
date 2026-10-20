@@ -60,6 +60,37 @@ async def test_stale_heartbeat_rescue(
     assert workers == 0
 
 
+async def test_rescue_spreads_requeued_jobs_with_jittered_backoff(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=10)
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        for _ in range(20):
+            await demo.using(session=session).enqueue()
+    worker = Worker(app, slots=40)
+    await worker.register()
+    await worker.claim_available()
+    async with connection(database_url) as opened:
+        await opened.execute("UPDATE akadze.jobs SET attempt = 4")
+    await age_worker_heartbeat(app.engine, worker.id, older_than=timedelta(minutes=2))
+
+    # Act
+    await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
+
+    # Assert
+    async with connection(database_url) as opened:
+        waits = await opened.fetch(
+            "SELECT extract(epoch FROM run_at - now()) AS wait FROM akadze.jobs"
+        )
+    seconds = [float(row["wait"]) for row in waits]
+    assert all(7.0 <= wait <= 16.0 for wait in seconds)
+    assert len({round(wait, 3) for wait in seconds}) > 1
+
+
 async def test_rescue_leaves_a_finished_job_alone(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("demo")
