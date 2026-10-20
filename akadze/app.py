@@ -11,11 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from akadze.exc import AkadzeError
 from akadze.hooks import Hooks
-from akadze.periodic import Schedule, ScheduleSpec
+from akadze.periodic import Schedule, ScheduleSpec, check_schedule
 from akadze.schema import async_database_url
 from akadze.task import Task
 
-_SCHEDULE_SPEC_KEYS = frozenset({"name", "cron", "every", "overlap", "queue"})
+_SCHEDULE_SPEC_KEYS = frozenset({"name", "cron", "every", "overlap", "queue", "timezone"})
 
 
 class Akadze:
@@ -118,11 +118,9 @@ class Akadze:
         queue: str = "default",
         max_attempts: int = 3,
         timeout: timedelta | None = None,
+        timezone: str | None = None,
     ) -> Callable[[Callable[..., Any]], Task[Any]]:
-        if (cron is None) == (every is None):
-            raise AkadzeError("periodic needs cron or every")
-        if every is not None and every <= timedelta(0):
-            raise AkadzeError("every must be positive")
+        check_schedule(cron, every, timezone)
 
         def decorate(fn: Callable[..., Any]) -> Task[Any]:
             registered = self.task(
@@ -132,7 +130,14 @@ class Akadze:
                 timeout=timeout,
             )(fn)
             self.schedules.append(
-                Schedule(name=name, cron=cron, every=every, overlap=overlap, queue=queue)
+                Schedule(
+                    name=name,
+                    cron=cron,
+                    every=every,
+                    overlap=overlap,
+                    queue=queue,
+                    timezone=timezone,
+                )
             )
             return registered
 
@@ -146,21 +151,26 @@ class Akadze:
         every: timedelta | None = None,
         overlap: bool = True,
         queue: str | None = None,
+        timezone: str | None = None,
     ) -> None:
         """Attach a periodic schedule to an already registered task.
 
-        Same cron/every/overlap/queue semantics as ``@periodic``. ``queue``
-        defaults to the task's queue. Returns nothing.
+        Same cron/every/overlap/queue/timezone semantics as ``@periodic``.
+        ``queue`` defaults to the task's queue. Returns nothing.
         """
         if name not in self.tasks:
             raise AkadzeError(f"task {name} is not registered")
-        if (cron is None) == (every is None):
-            raise AkadzeError("schedule needs cron or every")
-        if every is not None and every <= timedelta(0):
-            raise AkadzeError("every must be positive")
+        check_schedule(cron, every, timezone)
         resolved = queue if queue is not None else self.tasks[name].queue
         self.schedules.append(
-            Schedule(name=name, cron=cron, every=every, overlap=overlap, queue=resolved)
+            Schedule(
+                name=name,
+                cron=cron,
+                every=every,
+                overlap=overlap,
+                queue=resolved,
+                timezone=timezone,
+            )
         )
 
     def add_schedules(self, specs: Sequence[ScheduleSpec | Mapping[str, object]]) -> None:
@@ -174,6 +184,7 @@ class Akadze:
                 every=parsed.every,
                 overlap=parsed.overlap,
                 queue=parsed.queue,
+                timezone=parsed.timezone,
             )
 
     async def aclose(self) -> None:
@@ -202,4 +213,14 @@ def _schedule_spec_from_mapping(raw: Mapping[str, object]) -> ScheduleSpec:
     queue = raw.get("queue")
     if queue is not None and not isinstance(queue, str):
         raise AkadzeError("schedule queue must be a str")
-    return ScheduleSpec(name=name, cron=cron, every=every, overlap=overlap, queue=queue)
+    timezone = raw.get("timezone")
+    if timezone is not None and not isinstance(timezone, str):
+        raise AkadzeError("schedule timezone must be a str")
+    return ScheduleSpec(
+        name=name,
+        cron=cron,
+        every=every,
+        overlap=overlap,
+        queue=queue,
+        timezone=timezone,
+    )

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter  # type: ignore[import-untyped]
 from sqlalchemy import text
 
 from akadze.args import dump_arguments
 from akadze.enqueue import insert_job
-from akadze.exc import DuplicateJob
+from akadze.exc import AkadzeError, DuplicateJob
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class Schedule:
     every: timedelta | None
     overlap: bool
     queue: str
+    timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,9 +38,31 @@ class ScheduleSpec:
     every: timedelta | None = None
     overlap: bool = True
     queue: str | None = None
+    timezone: str | None = None
+
+
+def check_schedule(cron: str | None, every: timedelta | None, timezone: object) -> None:
+    """Validate schedule options shared by ``@periodic`` and ``add_schedule``."""
+
+    if (cron is None) == (every is None):
+        raise AkadzeError("schedule needs cron or every")
+    if every is not None and every <= timedelta(0):
+        raise AkadzeError("every must be positive")
+    if timezone is None:
+        return
+    if not isinstance(timezone, str):
+        raise AkadzeError("timezone must be an IANA zone name (str)")
+    if every is not None:
+        raise AkadzeError("timezone applies to cron schedules only")
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise AkadzeError(f"unknown timezone {timezone!r}") from None
 
 
 def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:
+    if schedule.cron is not None and schedule.timezone is not None:
+        return _previous_local_fire(schedule.cron, ZoneInfo(schedule.timezone), now)
     if schedule.cron is not None:
         previous = croniter(schedule.cron, now + timedelta(seconds=1)).get_prev(datetime)
         if not isinstance(previous, datetime):
@@ -51,6 +75,63 @@ def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:
     seconds = schedule.every.total_seconds()
     slot = now.timestamp() - (now.timestamp() % seconds)
     return datetime.fromtimestamp(slot, tz=now.tzinfo)
+
+
+_DST_PROBE = timedelta(hours=12)
+_MAX_CANDIDATES = 10_000
+
+
+def _previous_local_fire(cron: str, zone: ZoneInfo, now: datetime) -> datetime | None:
+    """Latest fire at or before now, with cron read on the zone's wall clock.
+
+    DST follows classic cron. When clocks go back, a fixed-hour entry fires once
+    (first occurrence) and an entry with ``*`` in the hour field fires in both
+    passes. When clocks go forward, a fixed-hour wall time inside the gap fires
+    shifted by the gap; an hourly-wildcard one just has no such minute.
+    """
+
+    wall = now.astimezone(zone).replace(tzinfo=None)
+    offsets = {
+        _seconds((now + step).astimezone(zone).utcoffset())
+        for step in (-_DST_PROBE, timedelta(0), _DST_PROBE)
+    }
+    if len(offsets) == 1:
+        fires = croniter(cron, wall + timedelta(seconds=1))
+        candidate = fires.get_prev(datetime)
+        if not isinstance(candidate, datetime):
+            return None
+        return candidate.replace(tzinfo=zone).astimezone(UTC)
+    margin = timedelta(seconds=max(offsets) - min(offsets), minutes=1)
+    fields = cron.split()
+    hourly = len(fields) > 1 and "*" in fields[1]
+    fires = croniter(cron, wall + margin)
+    best: datetime | None = None
+    for _ in range(_MAX_CANDIDATES):
+        candidate = fires.get_prev(datetime)
+        if not isinstance(candidate, datetime):
+            break
+        if best is not None and candidate < wall - margin:
+            break
+        for fire in _instants(candidate, zone, hourly=hourly):
+            if fire <= now and (best is None or fire > best):
+                best = fire
+    return best
+
+
+def _instants(local: datetime, zone: ZoneInfo, *, hourly: bool) -> list[datetime]:
+    first = local.replace(tzinfo=zone, fold=0)
+    second = local.replace(tzinfo=zone, fold=1)
+    real = first.astimezone(UTC).astimezone(zone).replace(tzinfo=None) == local
+    if not real:
+        return [] if hourly else [first.astimezone(UTC)]
+    if first.utcoffset() != second.utcoffset():
+        repeated = [first.astimezone(UTC), second.astimezone(UTC)]
+        return repeated if hourly else repeated[:1]
+    return [first.astimezone(UTC)]
+
+
+def _seconds(offset: timedelta | None) -> float:
+    return 0.0 if offset is None else offset.total_seconds()
 
 
 async def schedule_due(app: Any) -> None:

@@ -24,6 +24,7 @@ asyncpg = ">=0.30.0,<1.0.0"
 pydantic = "^2.10.0"
 croniter = "^6.0.0"
 sqlalchemy = {version = "^2.0.40", extras = ["asyncio"]}
+tzdata = ">=2024.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
