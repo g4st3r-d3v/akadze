@@ -51,6 +51,7 @@ class Task(Generic[P]):
         unique_key: str | None = None,
         limit_key: str | None = None,
         expires_at: datetime | None = None,
+        meta: Mapping[str, Any] | None = None,
     ) -> BoundTask[P]:
         return BoundTask(
             self,
@@ -62,6 +63,7 @@ class Task(Generic[P]):
             unique_key=unique_key,
             limit_key=limit_key,
             expires_at=expires_at,
+            meta=meta,
         )
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any:
@@ -81,6 +83,7 @@ class BoundTask(Generic[P]):
         unique_key: str | None,
         limit_key: str | None,
         expires_at: datetime | None,
+        meta: Mapping[str, Any] | None = None,
     ) -> None:
         self._task = task
         self._session = session
@@ -91,6 +94,7 @@ class BoundTask(Generic[P]):
         self._unique_key = unique_key
         self._limit_key = limit_key
         self._expires_at = expires_at
+        self._meta = meta
 
     async def enqueue(self, *args: P.args, **kwargs: P.kwargs) -> None:
         if args:
@@ -109,6 +113,7 @@ class BoundTask(Generic[P]):
             run_at=self._run_at,
             expires_at=self._expires_at,
             hooks=self._task.app.hooks,
+            meta=self._meta,
         )
 
     async def enqueue_many(self, items: Iterable[Mapping[str, Any]]) -> None:
@@ -143,4 +148,5 @@ class BoundTask(Generic[P]):
             run_at=self._run_at,
             expires_at=self._expires_at,
             hooks=self._task.app.hooks,
+            meta=self._meta,
         )
