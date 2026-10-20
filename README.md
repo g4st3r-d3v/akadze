@@ -6,7 +6,7 @@ Postgres-backed task queue: enqueue work and run it in a worker. Periodic schedu
 
 Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP LOCKED` + lease), not Redis or RabbitMQ.
 
-**Status:** alpha (0.3.x). Public API may still change between minors until 1.0; after Beta the surface freezes. Bugs → [Issues](https://github.com/g4st3r-d3v/akadze/issues).
+**Status:** alpha (0.x). Public API may still change between minors until 1.0; after Beta the surface freezes. Bugs → [Issues](https://github.com/g4st3r-d3v/akadze/issues).
 
 ## Goals
 
