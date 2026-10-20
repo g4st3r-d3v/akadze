@@ -53,7 +53,6 @@ async def test_migrate_creates_schema(database_url: str) -> None:
         "003_limits",
         "004_start_rate",
         "005_jobs_meta",
-        "006_claim_by_key",
     ]
     async with connection(database_url) as opened:
         tables = await opened.fetch(
@@ -165,7 +164,6 @@ async def test_migrate_is_idempotent(database_url: str) -> None:
         "003_limits",
         "004_start_rate",
         "005_jobs_meta",
-        "006_claim_by_key",
     ]
 
 
@@ -246,7 +244,6 @@ async def test_concurrent_migrate_applies_once(database_url: str) -> None:
         "003_limits",
         "004_start_rate",
         "005_jobs_meta",
-        "006_claim_by_key",
     ]
 
 

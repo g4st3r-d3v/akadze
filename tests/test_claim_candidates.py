@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 import pytest
 
 from akadze import Akadze
-from akadze.worker import _KEY_WALK, Worker
+from akadze.worker import Worker
 from tests.factories import apply_limit
 from tests.pg import connection
 
@@ -48,7 +48,7 @@ async def claim(app: Akadze) -> AsyncIterator[Claim]:
         await worker.shutdown()
 
 
-async def test_saturated_key_with_a_deep_head_does_not_block_others(
+async def test_head_blocked_by_a_saturated_key_falls_back_to_a_full_scan(
     app: Akadze, database_url: str, work: None, claim: Claim
 ) -> None:
     # Arrange: key "a" is at its limit and has 500 older jobs ahead of "b"
@@ -64,35 +64,48 @@ async def test_saturated_key_with_a_deep_head_does_not_block_others(
     assert await _running_by_key(database_url) == Counter({"a": 1, "b": 3})
 
 
-@pytest.mark.parametrize("fair", [False, True], ids=["default", "fair"])
-async def test_more_keys_than_the_walk_still_fill_the_slots(
-    app: Akadze, database_url: str, work: None, claim: Claim, fair: bool
-) -> None:
-    # Arrange: one job per key, more keys than the per-key walk covers
-    task = app.tasks["work"]
-    async with app.engine.begin() as session:
-        for n in range(_KEY_WALK + 50):
-            await task.using(session=session, limit_key=f"k{n:04}").enqueue()
-
-    # Act
-    await claim(slots=6, fair=fair)
-
-    # Assert
-    assert sum((await _running_by_key(database_url)).values()) == 6
-
-
-async def test_key_beyond_the_walk_is_claimed_when_it_reaches_the_head(
+async def test_head_filled_by_a_nearly_full_key_still_fills_the_slots(
     app: Akadze, database_url: str, work: None, claim: Claim
 ) -> None:
-    # Arrange: the last key in key order is the oldest job of the queue
+    # Arrange: "b" may start one more job and has 1000 older jobs; 20 small keys follow
+    await apply_limit(app.engine, key="b", max_running=5)
+    await _enqueue(app, "b", 1004)
+    await claim(slots=4)
     task = app.tasks["work"]
     async with app.engine.begin() as session:
-        await task.using(session=session, limit_key="zzz").enqueue()
-        for n in range(_KEY_WALK + 50):
-            await task.using(session=session, limit_key=f"k{n:04}").enqueue()
+        for n in range(20):
+            await task.using(session=session, limit_key=f"small-{n:02}").enqueue()
 
     # Act
-    await claim(slots=1)
+    await claim(slots=10)
 
     # Assert
-    assert await _running_by_key(database_url) == Counter({"zzz": 1})
+    running = await _running_by_key(database_url)
+    assert running["b"] == 5
+    assert sum(running.values()) == 14
+
+
+async def test_head_rows_held_by_another_claimer_are_skipped(
+    app: Akadze, database_url: str, work: None, claim: Claim
+) -> None:
+    # Arrange: another transaction holds the 50 oldest ready rows
+    await _enqueue(app, None, 60)
+    async with connection(database_url) as other:
+        holder = other.transaction()
+        await holder.start()
+        await other.execute(
+            """
+            SELECT id FROM akadze.jobs
+            WHERE state = 'queued'
+            ORDER BY priority DESC, run_at, id
+            LIMIT 50
+            FOR UPDATE
+            """
+        )
+
+        # Act
+        await claim(slots=2)
+
+        # Assert
+        assert await _running_by_key(database_url) == Counter({None: 2})
+        await holder.rollback()
