@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Generic, ParamSpec
 
@@ -10,8 +10,8 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from akadze.args import argument_model, dump_arguments
-from akadze.enqueue import insert_job
-from akadze.exc import AkadzeError
+from akadze.enqueue import check_options, insert_job, insert_jobs
+from akadze.exc import AkadzeError, EnqueueError
 from akadze.outcome import BackoffPolicy
 
 P = ParamSpec("P")
@@ -104,6 +104,40 @@ class BoundTask(Generic[P]):
             max_attempts=self._max_attempts,
             args=payload,
             unique_key=self._unique_key,
+            limit_key=self._limit_key,
+            delay=self._delay,
+            run_at=self._run_at,
+            expires_at=self._expires_at,
+            hooks=self._task.app.hooks,
+        )
+
+    async def enqueue_many(self, items: Iterable[Mapping[str, Any]]) -> None:
+        """Insert one job per item (arguments by name) with the shared options.
+
+        All items are validated before anything is inserted. ``unique_key``
+        applies to one job, so it is rejected here.
+        """
+
+        if self._unique_key is not None:
+            raise EnqueueError("unique_key applies to one job; enqueue_many does not take it")
+        if isinstance(items, Mapping | str | bytes):
+            raise EnqueueError("enqueue_many takes an iterable of mappings, not one mapping")
+        check_options(
+            self._priority, self._max_attempts, self._delay, self._run_at, self._expires_at
+        )
+        payloads = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                kind = type(item).__name__
+                raise EnqueueError(f"enqueue_many items must be mappings, got {kind}")
+            payloads.append(dump_arguments(self._task.arguments, dict(item), task=self._task.name))
+        await insert_jobs(
+            self._session,
+            task=self._task.name,
+            queue=self._task.queue,
+            priority=self._priority,
+            max_attempts=self._max_attempts,
+            args=payloads,
             limit_key=self._limit_key,
             delay=self._delay,
             run_at=self._run_at,

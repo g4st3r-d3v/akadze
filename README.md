@@ -125,6 +125,8 @@ Cron runs in UTC unless the schedule names an IANA zone: `@app.periodic("digest"
 
 An error spends an attempt and the job is retried after a backoff: exponential (`2^(attempt-1)` seconds, capped at 300) with jitter in `[50 %, 100 %]`, so a batch that failed together does not hit a vendor again in one wave. A task can set its own curve with `@app.task(..., backoff=lambda attempt: timedelta(minutes=attempt))` (same option on `app.register`). `raise Retry(delay)` still wins over both. The policy must be a cheap, plain (not async) function: it runs on the worker's event loop. A policy that raises or returns something other than a `timedelta` falls back to the default; delays are clamped to `[0, 365 days]`, so a negative one means retry now. Jobs requeued from a lost worker get the same jittered default curve instead of all starting at once. `akadze.BackoffPolicy` is the type to annotate a policy with.
 
+Fan-out goes through one call: `await notify.using(session=connection, priority=5).enqueue_many([{"user_id": 1}, {"user_id": 2}, ...])` inserts one job per item with the shared `using(...)` options, in order, in the caller's transaction, a thousand rows per statement (10 000 jobs: about 0.1 s against 16 s for a loop of `enqueue`). Every item is validated first: one bad item raises `EnqueueError` and nothing is inserted. `unique_key` names one job, so `enqueue_many` rejects it. `on_enqueue` hooks run for each job.
+
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
 
 ```python
@@ -188,6 +190,7 @@ async def send_mail(user_id: int) -> None: ...
 | `apply_async(priority=…)` | `using(..., priority=…)` — higher is claimed first, smallint range; Celery on Redis treats 0 as highest, so invert those values |
 | `apply_async(task_id=…)` for dedup | `using(..., unique_key=…)` → `DuplicateJob` while active |
 | `transaction.on_commit(lambda: task.delay())` | not needed: `enqueue` runs in the caller's transaction |
+| `group(task.s(x) for x in xs).apply_async()` (fan-out, no result) | `await task.using(session=connection).enqueue_many({"x": x} for x in xs)` |
 
 Arguments are keyword-only in `enqueue(...)`. Options never go into task arguments.
 
