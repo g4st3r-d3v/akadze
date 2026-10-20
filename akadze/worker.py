@@ -123,6 +123,7 @@ class Worker:
         heartbeat_ttl: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=1),
         shutdown_timeout: timedelta = timedelta(seconds=10),
+        fair: bool = False,
     ) -> None:
         if slots < 1:
             raise ValueError("slots must be at least 1")
@@ -135,6 +136,7 @@ class Worker:
         self.heartbeat_ttl = heartbeat_ttl
         self.poll_interval = poll_interval
         self.shutdown_timeout = shutdown_timeout
+        self.fair = fair
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
         self._last_heartbeat_ok = time.monotonic()
@@ -205,6 +207,7 @@ class Worker:
                     worker_id=self.id,
                     queue=queue,
                     limit=limit,
+                    fair=self.fair,
                 )
                 if limit > 0 and claimed == limit:
                     full = True
@@ -398,6 +401,12 @@ async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> 
         logger.info("job %s queued -> cancelled", job.id)
 
 
+_FAIR_TURN = """row_number() OVER (
+                        PARTITION BY ranked.priority, ranked.limit_key IS NULL, ranked.limit_key
+                        ORDER BY ranked.run_at, ranked.id
+                    )"""
+
+
 async def _claim(
     connection: AsyncConnection,
     *,
@@ -405,9 +414,20 @@ async def _claim(
     worker_id: UUID,
     queue: str,
     limit: int,
+    fair: bool = False,
 ) -> int:
+    """Claim up to limit ready jobs from queue in one statement.
+
+    Order is priority, then run_at, then id. With ``fair``, jobs of the same
+    priority are taken round-robin across limit_key groups (jobs without a key
+    form one group): the oldest job of every group first, then the second, and
+    so on, so one key with a deep backlog does not take every slot.
+    """
+
     if limit <= 0:
         return 0
+    turn = "eligible.fair_rn, " if fair else ""
+    turn_column = _FAIR_TURN if fair else "0"
     result = await connection.execute(
         text(
             f"""
@@ -506,7 +526,11 @@ async def _claim(
                 FROM candidates
             ),
             eligible AS (
-                SELECT ranked.id, ranked.priority, ranked.run_at
+                SELECT
+                    ranked.id,
+                    ranked.priority,
+                    ranked.run_at,
+                    {turn_column} AS fair_rn
                 FROM ranked
                 WHERE ranked.limit_key IS NULL
                    OR (
@@ -527,7 +551,7 @@ async def _claim(
                 FROM akadze.jobs AS job
                 INNER JOIN eligible ON eligible.id = job.id
                 WHERE job.state = 'queued'
-                ORDER BY job.priority DESC, job.run_at, job.id
+                ORDER BY job.priority DESC, {turn}job.run_at, job.id
                 LIMIT :limit
                 FOR UPDATE OF job SKIP LOCKED
             ),
