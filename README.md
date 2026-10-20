@@ -123,6 +123,8 @@ Cron runs in UTC unless the schedule names an IANA zone: `@app.periodic("digest"
 
 `akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `max_attempts`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `priority` and `max_attempts` override the task defaults for that one job; `max_attempts` must be between 1 and 2147483647, otherwise `EnqueueError` is raised and nothing is inserted. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
 
+An error spends an attempt and the job is retried after a backoff: exponential (`2^(attempt-1)` seconds, capped at 300) with jitter in `[50 %, 100 %]`, so a batch that failed together does not hit a vendor again in one wave. A task can set its own curve with `@app.task(..., backoff=lambda attempt: timedelta(minutes=attempt))` (same option on `app.register`). `raise Retry(delay)` still wins over both. A policy that raises or returns something other than a `timedelta` falls back to the default; a negative delay means retry now.
+
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
 
 ```python
@@ -194,7 +196,7 @@ Arguments are keyword-only in `enqueue(...)`. Options never go into task argumen
 | Celery | akadze |
 |---|---|
 | `raise self.retry(countdown=10)` | `raise Retry(timedelta(seconds=10))` — spends an attempt |
-| `autoretry_for=(Exception,)` | default: any exception retries with backoff until `max_attempts` |
+| `autoretry_for=(Exception,)`, `retry_backoff`, `retry_jitter` | default: any exception retries with jittered exponential backoff until `max_attempts`; custom curve via `@app.task(..., backoff=fn)` |
 | retry without spending the budget (polling) | `raise Snooze(timedelta(...))` — does not spend an attempt |
 | `raise Reject(requeue=False)` / give up | `raise Fail("reason")` |
 | `revoke(task_id)` | `request_cancel(session, job_id)` or `akadze jobs cancel JOB_ID`; inside a task `raise Cancel()` |

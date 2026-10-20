@@ -63,6 +63,7 @@ class Akadze:
         max_attempts: int = 3,
         timeout: timedelta | None = None,
         priority: int = 0,
+        backoff: Callable[[int], timedelta] | None = None,
     ) -> Task[P]:
         """Bind a callable into the task registry without decorating on ``app``.
 
@@ -73,6 +74,8 @@ class Akadze:
             raise AkadzeError("max_attempts must be at least 1")
         if timeout is not None and timeout <= timedelta(0):
             raise AkadzeError("timeout must be positive")
+        if backoff is not None and not callable(backoff):
+            raise AkadzeError("backoff must be callable")
         if name in self.tasks:
             raise AkadzeError(f"task {name} is already registered")
         registered: Task[P] = Task(
@@ -83,6 +86,7 @@ class Akadze:
             max_attempts=max_attempts,
             timeout=timeout,
             priority=priority,
+            backoff=backoff,
         )
         self.tasks[name] = registered
         return registered
@@ -95,6 +99,7 @@ class Akadze:
         max_attempts: int = 3,
         timeout: timedelta | None = None,
         priority: int = 0,
+        backoff: Callable[[int], timedelta] | None = None,
     ) -> Callable[[Callable[P, Any]], Task[P]]:
         def decorate(fn: Callable[P, Any]) -> Task[P]:
             return self.register(
@@ -104,6 +109,7 @@ class Akadze:
                 max_attempts=max_attempts,
                 timeout=timeout,
                 priority=priority,
+                backoff=backoff,
             )
 
         return decorate

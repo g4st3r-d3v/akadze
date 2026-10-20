@@ -27,6 +27,7 @@ class Task(Generic[P]):
         max_attempts: int,
         timeout: timedelta | None,
         priority: int,
+        backoff: Callable[[int], timedelta] | None = None,
     ) -> None:
         self.app = app
         self.name = name
@@ -35,6 +36,7 @@ class Task(Generic[P]):
         self.max_attempts = max_attempts
         self.timeout = timeout
         self.priority = priority
+        self.backoff = backoff
         self.arguments: type[BaseModel] = argument_model(fn)
 
     def using(
