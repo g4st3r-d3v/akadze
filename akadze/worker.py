@@ -123,6 +123,7 @@ class Worker:
         heartbeat_ttl: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=1),
         shutdown_timeout: timedelta = timedelta(seconds=10),
+        fair: bool = False,
     ) -> None:
         if slots < 1:
             raise ValueError("slots must be at least 1")
@@ -135,6 +136,7 @@ class Worker:
         self.heartbeat_ttl = heartbeat_ttl
         self.poll_interval = poll_interval
         self.shutdown_timeout = shutdown_timeout
+        self.fair = fair
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
         self._last_heartbeat_ok = time.monotonic()
@@ -205,6 +207,7 @@ class Worker:
                     worker_id=self.id,
                     queue=queue,
                     limit=limit,
+                    fair=self.fair,
                 )
                 if limit > 0 and claimed == limit:
                     full = True
@@ -405,9 +408,47 @@ async def _claim(
     worker_id: UUID,
     queue: str,
     limit: int,
+    fair: bool = False,
 ) -> int:
+    """Claim up to limit ready jobs from queue in one statement.
+
+    Order is priority, then run_at, then id. With ``fair``, jobs of the same
+    priority go to the limit_key group (jobs without a key form one group)
+    with the fewest jobs already running in this queue across the cluster,
+    then the next: a job's turn is its group's running count plus its place
+    in the group. One key with a deep backlog cannot hold every slot, across
+    claims and across workers.
+    """
+
     if limit <= 0:
         return 0
+    if fair:
+        fair_rn = """,
+                    row_number() OVER (
+                        PARTITION BY ranked.priority, ranked.limit_key
+                        ORDER BY ranked.run_at, ranked.id
+                    ) AS fair_rn"""
+        fair_ctes = """
+            group_load AS (
+                SELECT jobs.limit_key, count(*)::int AS busy
+                FROM akadze.jobs AS jobs
+                WHERE jobs.state = 'running'
+                  AND jobs.queue = :queue
+                GROUP BY jobs.limit_key
+            ),
+            turns AS (
+                SELECT eligible.id, eligible.fair_rn + coalesce(group_load.busy, 0) AS turn
+                FROM eligible
+                LEFT JOIN group_load
+                    ON group_load.limit_key IS NOT DISTINCT FROM eligible.limit_key
+                WHERE eligible.fair_rn <= :limit
+            ),"""
+        source = "turns"
+        order = "job.priority DESC, turns.turn, job.run_at, job.id"
+    else:
+        fair_rn = fair_ctes = ""
+        source = "eligible"
+        order = "job.priority DESC, job.run_at, job.id"
     result = await connection.execute(
         text(
             f"""
@@ -506,7 +547,11 @@ async def _claim(
                 FROM candidates
             ),
             eligible AS (
-                SELECT ranked.id, ranked.priority, ranked.run_at
+                SELECT
+                    ranked.id,
+                    ranked.priority,
+                    ranked.run_at,
+                    ranked.limit_key{fair_rn}
                 FROM ranked
                 WHERE ranked.limit_key IS NULL
                    OR (
@@ -521,13 +566,13 @@ async def _claim(
                                <= ranked.max_starts
                         )
                    )
-            ),
+            ),{fair_ctes}
             picked AS (
                 SELECT job.id
                 FROM akadze.jobs AS job
-                INNER JOIN eligible ON eligible.id = job.id
+                INNER JOIN {source} ON {source}.id = job.id
                 WHERE job.state = 'queued'
-                ORDER BY job.priority DESC, job.run_at, job.id
+                ORDER BY {order}
                 LIMIT :limit
                 FOR UPDATE OF job SKIP LOCKED
             ),

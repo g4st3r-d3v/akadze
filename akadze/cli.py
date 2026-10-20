@@ -42,6 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("app", help="Import path of an Akadze app, for example demo:app")
     worker.add_argument("--slots", type=int, default=1)
     worker.add_argument("--queue", action="append", dest="queues")
+    worker.add_argument(
+        "--fair",
+        action="store_true",
+        help="Within a priority, claim round-robin across limit_key groups",
+    )
     sub.add_parser("beat", help="Unused: periodic tasks run inside the worker")
     sub.add_parser("migrate", help="Apply schema migrations")
 
@@ -97,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     if args.command == "worker":
-        return _run_worker(args.app, slots=args.slots, queues=args.queues)
+        return _run_worker(args.app, slots=args.slots, queues=args.queues, fair=args.fair)
     if args.command == "jobs":
         if args.jobs_command == "list":
             return _run_jobs_list(
@@ -455,9 +460,9 @@ def _format_dt(value: datetime | None) -> str:
     return value.isoformat()
 
 
-def _run_worker(spec: str, *, slots: int, queues: list[str] | None) -> int:
+def _run_worker(spec: str, *, slots: int, queues: list[str] | None, fair: bool) -> int:
     app = _load_app(spec)
-    worker = Worker(app, slots=slots, queues=queues)
+    worker = Worker(app, slots=slots, queues=queues, fair=fair)
 
     async def _run() -> None:
         try:
