@@ -46,16 +46,24 @@ jobs:
       - run: poetry run pytest
       - run: poetry build
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+          if draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>&1)"; then
             gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
+            if [ "$draft" = "true" ]; then
+              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+            fi
+          elif [ "$draft" = "release not found" ]; then
             gh release create "$GITHUB_REF_NAME" dist/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
               --notes "Release ${GITHUB_REF_NAME#v} of akadze." \
               --verify-tag
+          else
+            echo "$draft" >&2
+            exit 1
           fi
