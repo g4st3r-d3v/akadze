@@ -6,7 +6,7 @@ Postgres-backed task queue: enqueue work and run it in a worker. Periodic schedu
 
 Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP LOCKED` + lease), not Redis or RabbitMQ.
 
-**Status:** alpha (0.3.x). Public API may still change between minors until 1.0; after Beta the surface freezes. Bugs → [Issues](https://github.com/g4st3r-d3v/akadze/issues).
+**Status:** alpha (0.x). Public API may still change between minors until 1.0; after Beta the surface freezes. Bugs → [Issues](https://github.com/g4st3r-d3v/akadze/issues).
 
 ## Goals
 
@@ -167,7 +167,7 @@ Enqueue options go through `using(...)`, not as task kwargs. No `.get()` / resul
 
 ## Release
 
-Create a tag `vX.Y.Z` that matches the version in `pyproject.toml` and push it. GitHub Actions runs the tests, publishes the wheel to PyPI, and opens a GitHub release.
+Create a tag `vX.Y.Z` that matches the version in `pyproject.toml` and push it. Do not create the GitHub release by hand. GitHub Actions runs the tests, publishes the wheel to PyPI, and creates the GitHub release with the built files. If a release for the tag already exists, the workflow uploads the files to it and publishes it if it is a draft. Re-running the workflow is safe: files already on PyPI are skipped.
 
 PyPI trusted publishing, set once on the project `akadze`:
 
