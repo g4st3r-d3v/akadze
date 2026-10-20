@@ -460,7 +460,7 @@ def _format_dt(value: datetime | None) -> str:
     return value.isoformat()
 
 
-def _run_worker(spec: str, *, slots: int, queues: list[str] | None, fair: bool = False) -> int:
+def _run_worker(spec: str, *, slots: int, queues: list[str] | None, fair: bool) -> int:
     app = _load_app(spec)
     worker = Worker(app, slots=slots, queues=queues, fair=fair)
 
