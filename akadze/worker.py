@@ -416,43 +416,44 @@ async def _claim_queue(
     """Claim up to limit jobs, reading only the head of the queue when that is enough.
 
     In the default order, the eligible jobs ahead of any picked job lie in the
-    head, so a head claim that fills ``limit`` picks what a full scan would. If
-    it falls short (limits block the head, other claimers hold its rows, or the
-    queue is nearly empty), the rest comes from a full scan in the same
-    transaction. Fair turns are not a prefix of the head, so fair claims scan.
+    head, so a head claim that fills ``limit`` picks what a full scan would; so
+    does one whose head held every ready row. Otherwise (limits block the head,
+    other claimers hold its rows) the head claim is rolled back to its
+    savepoint, releasing its locks, and a full scan claims instead. Fair turns
+    are not a prefix of the head, so fair claims always scan. Transition hooks
+    run once the claim is final.
     """
 
     if limit <= 0:
         return 0
-    if fair:
-        return await _claim(
-            connection, hooks=hooks, worker_id=worker_id, queue=queue, limit=limit, fair=True
+    jobs: list[Job] = []
+    if not fair:
+        savepoint = await connection.begin_nested()
+        jobs, ready_rows = await _claim(
+            connection, worker_id=worker_id, queue=queue, limit=limit, head=limit * _HEAD_FACTOR
         )
-    claimed = await _claim(
-        connection,
-        hooks=hooks,
-        worker_id=worker_id,
-        queue=queue,
-        limit=limit,
-        head=limit * _HEAD_FACTOR,
-    )
-    if claimed < limit:
-        claimed += await _claim(
-            connection, hooks=hooks, worker_id=worker_id, queue=queue, limit=limit - claimed
-        )
-    return claimed
+        if len(jobs) == limit or 0 < ready_rows < limit * _HEAD_FACTOR:
+            await savepoint.commit()
+        else:
+            await savepoint.rollback()
+            jobs = []
+    if not jobs:
+        jobs, _ = await _claim(connection, worker_id=worker_id, queue=queue, limit=limit, fair=fair)
+    for job in jobs:
+        await hooks.ran_transition(connection, job, "queued", "running")
+        logger.info("job %s queued -> running", job.id)
+    return len(jobs)
 
 
 async def _claim(
     connection: AsyncConnection,
     *,
-    hooks: Hooks,
     worker_id: UUID,
     queue: str,
     limit: int,
     fair: bool = False,
     head: int | None = None,
-) -> int:
+) -> tuple[list[Job], int]:
     """Claim up to limit ready jobs from queue in one statement.
 
     Order is priority, then run_at, then id. With ``fair``, jobs of the same
@@ -460,11 +461,13 @@ async def _claim(
     with the fewest jobs already running in this queue across the cluster,
     then the next: a job's turn is its group's running count plus its place
     in the group. One key with a deep backlog cannot hold every slot, across
-    claims and across workers.
+    claims and across workers. With ``head``, only the top ``head`` ready rows
+    are candidates.
+
+    Returns the claimed jobs and how many ready rows were candidates (0 when
+    nothing was claimed). Transition hooks are the caller's.
     """
 
-    if limit <= 0:
-        return 0
     head_sql = (
         """
                 ORDER BY j.priority DESC, j.run_at, j.id
@@ -524,6 +527,7 @@ async def _claim(
                     FROM ready
                     WHERE ready.limit_key IS NOT NULL
                 )
+                ORDER BY l.key
                 FOR UPDATE
             ),
             running AS (
@@ -654,18 +658,14 @@ async def _claim(
                   AND marks.started_at < now() - limits."window"
                 RETURNING marks.id
             )
-            SELECT * FROM claimed
+            SELECT claimed.*, (SELECT count(*) FROM ready) AS ready_rows FROM claimed
             """
         ),
         {"queue": queue, "limit": limit, "head": head, "worker_id": worker_id},
     )
-    claimed = 0
-    for row in result.mappings():
-        claimed += 1
-        job = job_from_mapping(row)
-        await hooks.ran_transition(connection, job, "queued", "running")
-        logger.info("job %s queued -> running", job.id)
-    return claimed
+    rows = result.mappings().all()
+    ready_rows = int(rows[0]["ready_rows"]) if rows else 0
+    return [job_from_mapping(row) for row in rows], ready_rows
 
 
 async def _release(connection: AsyncConnection, hooks: Hooks, worker_id: UUID) -> None:

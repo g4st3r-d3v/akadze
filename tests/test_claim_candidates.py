@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 import pytest
 
 from akadze import Akadze
+from akadze.job import Job
 from akadze.worker import Worker
 from tests.factories import apply_limit
 from tests.pg import connection
@@ -109,3 +110,43 @@ async def test_head_rows_held_by_another_claimer_are_skipped(
         # Assert
         assert await _running_by_key(database_url) == Counter({None: 2})
         await holder.rollback()
+
+
+async def test_head_claim_keeps_priority_order_beyond_the_head_size(
+    app: Akadze, database_url: str, work: None, claim: Claim
+) -> None:
+    # Arrange: 200 older low-priority jobs, then 5 newer urgent ones
+    task = app.tasks["work"]
+    async with app.engine.begin() as session:
+        await task.using(session=session, limit_key="bulk").enqueue_many([{}] * 200)
+        await task.using(session=session, limit_key="urgent", priority=10).enqueue_many([{}] * 5)
+
+    # Act
+    await claim(slots=5)
+
+    # Assert
+    assert await _running_by_key(database_url) == Counter({"urgent": 5})
+
+
+async def test_transition_hooks_run_once_per_claimed_job_after_a_fallback(
+    app: Akadze, database_url: str, work: None, claim: Claim
+) -> None:
+    # Arrange: the head is blocked by a saturated key, so the head claim is rolled back
+    await apply_limit(app.engine, key="a", max_running=1)
+    await _enqueue(app, "a", 101)
+    await claim(slots=1)
+    await _enqueue(app, "b", 3)
+    seen: list[int] = []
+
+    async def record(connection: object, job: Job, before: str, after: str) -> None:
+        if after == "running":
+            seen.append(job.id)
+
+    app.hooks.on_transition.append(record)
+
+    # Act
+    await claim(slots=3)
+
+    # Assert
+    assert len(seen) == 3
+    assert len(set(seen)) == 3
