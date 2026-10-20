@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from akadze import Akadze, AkadzeError, EnqueueError
+from akadze import Akadze, EnqueueError
 from akadze.worker import Worker
 from tests.pg import as_json, connection, job_row, job_rows
 
@@ -206,16 +206,19 @@ async def test_using_max_attempts_sets_the_job_ceiling(
     assert row["max_attempts"] == expected
 
 
-async def test_using_rejects_max_attempts_below_one(app: Akadze, database_url: str) -> None:
+@pytest.mark.parametrize("max_attempts", [0, -1, 2**31], ids=["zero", "negative", "above-int4"])
+async def test_using_rejects_max_attempts_out_of_range(
+    app: Akadze, database_url: str, max_attempts: int
+) -> None:
     # Arrange
     @app.task("demo")
     async def demo() -> None:
         return None
 
     # Act / Assert
-    with pytest.raises(AkadzeError, match="max_attempts must be at least 1"):
+    with pytest.raises(EnqueueError, match="max_attempts must be between 1 and 2147483647"):
         async with app.engine.begin() as session:
-            await demo.using(session=session, max_attempts=0).enqueue()
+            await demo.using(session=session, max_attempts=max_attempts).enqueue()
     assert await job_rows(database_url) == []
 
 
@@ -238,4 +241,26 @@ async def test_per_job_max_attempts_keeps_retrying_past_the_task_default(
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["state"] == "queued"
+    assert row["attempt"] == 1
+
+
+async def test_per_job_max_attempts_below_the_task_default_fails_early(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=5)
+    async def demo() -> None:
+        raise RuntimeError("boom")
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session, max_attempts=1).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "failed"
     assert row["attempt"] == 1

@@ -49,8 +49,6 @@ class Task(Generic[P]):
         limit_key: str | None = None,
         expires_at: datetime | None = None,
     ) -> BoundTask[P]:
-        if max_attempts is not None and max_attempts < 1:
-            raise AkadzeError("max_attempts must be at least 1")
         return BoundTask(
             self,
             session=session,

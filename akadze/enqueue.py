@@ -18,6 +18,7 @@ _ACTIVE_UNIQUE_KEY = "jobs_unique_key_active_idx"
 
 _PRIORITY_MIN = -32768
 _PRIORITY_MAX = 32767
+_MAX_ATTEMPTS_MAX = 2147483647
 
 
 async def insert_job(
@@ -45,6 +46,8 @@ async def insert_job(
         raise EnqueueError("expires_at must be timezone-aware")
     if not _PRIORITY_MIN <= priority <= _PRIORITY_MAX:
         raise EnqueueError("priority must fit in smallint")
+    if not 1 <= max_attempts <= _MAX_ATTEMPTS_MAX:
+        raise EnqueueError("max_attempts must be between 1 and 2147483647")
     connection = await _connection(session)
     if delay is not None:
         run_at_sql = "now() + CAST(:delay AS interval)"
