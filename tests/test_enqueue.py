@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from akadze import Akadze, EnqueueError
+from akadze import Akadze, AkadzeError, EnqueueError
 from akadze.worker import Worker
 from tests.pg import as_json, connection, job_row, job_rows
 
@@ -178,3 +178,64 @@ async def test_expires_at_cancels_before_the_task_runs(app: Akadze, database_url
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["state"] == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [(None, 3), (10, 10)],
+    ids=["task-default", "per-job"],
+)
+async def test_using_max_attempts_sets_the_job_ceiling(
+    app: Akadze,
+    database_url: str,
+    override: int | None,
+    expected: int,
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        return None
+
+    # Act
+    async with app.engine.begin() as session:
+        await demo.using(session=session, max_attempts=override).enqueue()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["max_attempts"] == expected
+
+
+async def test_using_rejects_max_attempts_below_one(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="max_attempts must be at least 1"):
+        async with app.engine.begin() as session:
+            await demo.using(session=session, max_attempts=0).enqueue()
+    assert await job_rows(database_url) == []
+
+
+async def test_per_job_max_attempts_keeps_retrying_past_the_task_default(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=1)
+    async def demo() -> None:
+        raise RuntimeError("boom")
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session, max_attempts=2).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "queued"
+    assert row["attempt"] == 1

@@ -44,16 +44,20 @@ class Task(Generic[P]):
         delay: timedelta | None = None,
         run_at: datetime | None = None,
         priority: int | None = None,
+        max_attempts: int | None = None,
         unique_key: str | None = None,
         limit_key: str | None = None,
         expires_at: datetime | None = None,
     ) -> BoundTask[P]:
+        if max_attempts is not None and max_attempts < 1:
+            raise AkadzeError("max_attempts must be at least 1")
         return BoundTask(
             self,
             session=session,
             delay=delay,
             run_at=run_at,
             priority=self.priority if priority is None else priority,
+            max_attempts=self.max_attempts if max_attempts is None else max_attempts,
             unique_key=unique_key,
             limit_key=limit_key,
             expires_at=expires_at,
@@ -72,6 +76,7 @@ class BoundTask(Generic[P]):
         delay: timedelta | None,
         run_at: datetime | None,
         priority: int,
+        max_attempts: int,
         unique_key: str | None,
         limit_key: str | None,
         expires_at: datetime | None,
@@ -81,6 +86,7 @@ class BoundTask(Generic[P]):
         self._delay = delay
         self._run_at = run_at
         self._priority = priority
+        self._max_attempts = max_attempts
         self._unique_key = unique_key
         self._limit_key = limit_key
         self._expires_at = expires_at
@@ -94,7 +100,7 @@ class BoundTask(Generic[P]):
             task=self._task.name,
             queue=self._task.queue,
             priority=self._priority,
-            max_attempts=self._task.max_attempts,
+            max_attempts=self._max_attempts,
             args=payload,
             unique_key=self._unique_key,
             limit_key=self._limit_key,
