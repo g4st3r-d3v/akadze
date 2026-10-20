@@ -119,6 +119,8 @@ app.add_schedule("ops.prune", every=timedelta(seconds=30), overlap=False)
 # or many: app.add_schedules([{"name": "ops.prune", "cron": "0 * * * *"}, ...])
 ```
 
+Cron runs in UTC unless the schedule names an IANA zone: `@app.periodic("digest", cron="0 9 * * *", timezone="Europe/Moscow")`, or `timezone=` in `add_schedule` / a spec. The cron is read on that zone's wall clock. When clocks go back, a repeated wall time fires once; when clocks go forward, a skipped wall time fires shifted by the gap (02:30 becomes 03:30), so a daily job is not lost. `timezone` is rejected for `every` schedules and for unknown zones.
+
 `akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `max_attempts`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `priority` and `max_attempts` override the task defaults for that one job; `max_attempts` must be between 1 and 2147483647, otherwise `EnqueueError` is raised and nothing is inserted. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
 
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
@@ -230,7 +232,7 @@ async def build(report_id: int) -> None:
 
 ### 6. Beat
 
-`celery beat` and its schedule move into the worker: `@app.periodic("name", cron="0 * * * *")` or `every=timedelta(...)`, or `app.add_schedules([...])` from the application's config. Every worker runs the schedule; a due slot is enqueued once. There is no separate beat process (`akadze beat` is a stub).
+`celery beat` and its schedule move into the worker: `@app.periodic("name", cron="0 * * * *")` (with `timezone="Europe/Berlin"` for Celery's `beat_cron_timezone` / `CELERY_TIMEZONE`) or `every=timedelta(...)`, or `app.add_schedules([...])` from the application's config. Every worker runs the schedule; a due slot is enqueued once. There is no separate beat process (`akadze beat` is a stub).
 
 ### 7. Operating it
 
