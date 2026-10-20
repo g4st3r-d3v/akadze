@@ -174,11 +174,15 @@ def _require_database_url() -> str | None:
 def _run_jobs_list(
     *, queue: str | None, state: str | None, limit: int, meta: list[str] | None = None
 ) -> int:
+    try:
+        filters = _parse_meta(meta or [])
+    except AkadzeError as exc:
+        print(f"jobs list: {exc}", file=sys.stderr)
+        return 2
     database_url = _require_database_url()
     if database_url is None:
         return 2
     try:
-        filters = _parse_meta(meta or [])
         summaries = asyncio.run(
             _list_jobs(database_url, queue=queue, state=state, limit=limit, meta=filters)
         )
@@ -397,7 +401,7 @@ def _format_job_line(job: JobSummary) -> str:
         f"priority={job.priority} attempt={job.attempt} max_attempts={job.max_attempts} "
         f"run_at={_format_dt(job.run_at)} started_at={_format_dt(job.started_at)} "
         f"finished_at={_format_dt(job.finished_at)} "
-        f"meta={json.dumps(job.meta, separators=(',', ':'), sort_keys=True)}"
+        f"meta={json.dumps(dict(job.meta), separators=(',', ':'), sort_keys=True)}"
     )
 
 
@@ -407,6 +411,8 @@ def _parse_meta(pairs: list[str]) -> dict[str, object]:
         key, sep, raw = pair.partition("=")
         if not sep or not key:
             raise AkadzeError(f"--meta expects KEY=VALUE, got {pair!r}")
+        if key in filters:
+            raise AkadzeError(f"--meta {key} given more than once")
         try:
             filters[key] = json.loads(raw)
         except ValueError:

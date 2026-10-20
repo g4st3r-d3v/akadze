@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy import text
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from akadze.enqueue import dump_meta
 from akadze.exc import AkadzeError, EnqueueError
+from akadze.job import _decode_json
 
 _JOB_STATES = frozenset({"queued", "running", "succeeded", "failed", "cancelled"})
 _LIMIT_MIN = 1
@@ -46,7 +47,7 @@ class JobSummary:
     run_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
-    meta: dict[str, Any] = field(default_factory=dict)
+    meta: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}), hash=False)
 
 
 async def queue_snapshot(engine: AsyncEngine) -> QueueSnapshot:
@@ -112,7 +113,7 @@ async def list_jobs(
     if state is not None:
         clauses.append("state = :state")
         params["state"] = state
-    if meta:
+    if meta is not None:
         try:
             params["meta"] = dump_meta(meta)
         except EnqueueError as exc:
@@ -147,13 +148,12 @@ async def list_jobs(
                 run_at=row.run_at,
                 started_at=row.started_at,
                 finished_at=row.finished_at,
-                meta=_as_meta(row.meta),
+                meta=MappingProxyType(_as_meta(row.meta)),
             )
             for row in rows
         )
 
 
 def _as_meta(value: object) -> dict[str, Any]:
-    if isinstance(value, str):
-        value = json.loads(value)
-    return dict(value) if isinstance(value, dict) else {}
+    decoded = _decode_json(value)
+    return dict(decoded) if isinstance(decoded, dict) else {}

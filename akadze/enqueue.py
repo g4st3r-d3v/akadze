@@ -171,19 +171,34 @@ def _run_at_sql(delay: timedelta | None, run_at: datetime | None) -> str:
 
 
 def dump_meta(meta: Mapping[str, Any] | None) -> str:
-    """Validate job metadata and return it as JSON text. Raises EnqueueError."""
+    """Validate job metadata and return it as JSON text. Raises EnqueueError.
+
+    Postgres jsonb is the target: keys must be str at every level, and NaN,
+    infinities, NUL characters and lone surrogates are rejected up front.
+    """
 
     if meta is None:
         return "{}"
-    if not isinstance(meta, Mapping) or not all(isinstance(key, str) for key in meta):
+    if not isinstance(meta, Mapping) or not _str_keys(meta):
         raise EnqueueError("meta must be a mapping with str keys")
     try:
-        encoded = json.dumps(dict(meta), separators=(",", ":"))
-    except (TypeError, ValueError):
+        encoded = json.dumps(dict(meta), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        size = len(encoded.encode())
+    except (TypeError, ValueError, UnicodeEncodeError):
         raise EnqueueError("meta must be JSON-serializable") from None
-    if len(encoded.encode()) > _META_MAX_BYTES:
+    if "\\u0000" in encoded:
+        raise EnqueueError("meta must not contain NUL characters")
+    if size > _META_MAX_BYTES:
         raise EnqueueError(f"meta must be at most {_META_MAX_BYTES} bytes as JSON")
     return encoded
+
+
+def _str_keys(value: object) -> bool:
+    if isinstance(value, Mapping):
+        return all(isinstance(key, str) and _str_keys(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return all(_str_keys(item) for item in value)
+    return True
 
 
 async def request_cancel(session: AsyncConnection | AsyncSession, job_id: int) -> None:

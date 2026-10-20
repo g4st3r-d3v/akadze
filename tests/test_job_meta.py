@@ -6,8 +6,10 @@ import sys
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from akadze import Akadze, AkadzeError, EnqueueError, list_jobs
+from akadze.job import Job
 from tests.pg import as_json, connection, job_rows
 
 
@@ -81,8 +83,11 @@ async def test_list_jobs_without_meta_filter_returns_meta(app: Akadze) -> None:
         ({1: "int key"}, "mapping with str keys"),
         ({"when": object()}, "JSON-serializable"),
         ({"blob": "x" * 9000}, "at most 8192 bytes"),
+        ({"score": float("nan")}, "JSON-serializable"),
+        ({"name": "a\x00b"}, "NUL"),
+        ({"items": {1: "a"}}, "mapping with str keys"),
     ],
-    ids=["list", "int-key", "not-json", "too-big"],
+    ids=["list", "int-key", "not-json", "too-big", "nan", "nul", "nested-int-key"],
 )
 async def test_using_rejects_bad_meta(
     app: Akadze, database_url: str, meta: object, message: str
@@ -99,10 +104,54 @@ async def test_using_rejects_bad_meta(
     assert await job_rows(database_url) == []
 
 
-async def test_list_jobs_rejects_a_bad_meta_filter(app: Akadze) -> None:
+@pytest.mark.parametrize("meta", [{1: "x"}, [], ""], ids=["int-key", "empty-list", "empty-str"])
+async def test_list_jobs_rejects_a_bad_meta_filter(app: Akadze, meta: object) -> None:
     # Arrange / Act / Assert
     with pytest.raises(AkadzeError, match="mapping with str keys"):
-        await list_jobs(app.engine, meta={1: "x"})  # type: ignore[dict-item]
+        await list_jobs(app.engine, meta=meta)  # type: ignore[arg-type]
+
+
+async def test_non_ascii_meta_is_measured_in_utf8(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("order.sync")
+    async def sync(order_id: int) -> None:
+        return None
+
+    # Act
+    async with app.engine.begin() as session:
+        await sync.using(session=session, meta={"customer": "д" * 1400}).enqueue(order_id=1)
+
+    # Assert
+    assert len(await job_rows(database_url)) == 1
+
+
+async def test_summary_stays_hashable_and_meta_read_only(app: Akadze) -> None:
+    # Arrange
+    await _enqueue(app, a={"tenant": "acme"})
+
+    # Act
+    (job,) = await list_jobs(app.engine)
+
+    # Assert
+    assert {job} == {job}
+    with pytest.raises(TypeError):
+        job.meta["tenant"] = "globex"  # type: ignore[index]
+
+
+async def test_hooks_see_the_job_meta(app: Akadze) -> None:
+    # Arrange
+    seen: list[dict[str, Any]] = []
+
+    async def record(connection: AsyncConnection, job: Job) -> None:
+        seen.append(job.meta)
+
+    app.hooks.on_enqueue.append(record)
+
+    # Act
+    await _enqueue(app, a={"tenant": "acme"})
+
+    # Assert
+    assert seen == [{"tenant": "acme"}]
 
 
 async def test_cli_jobs_list_filters_and_prints_meta(app: Akadze, database_url: str) -> None:
@@ -130,8 +179,21 @@ async def test_cli_jobs_list_rejects_a_malformed_meta_flag(database_url: str) ->
     result = _cli(env, "jobs", "list", "--meta", "tenant")
 
     # Assert
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "KEY=VALUE" in result.stderr
+
+
+async def test_cli_jobs_list_rejects_a_repeated_meta_key(database_url: str) -> None:
+    # Arrange
+    env = os.environ.copy()
+    env["AKADZE_DATABASE_URL"] = database_url
+
+    # Act
+    result = _cli(env, "jobs", "list", "--meta", "tenant=acme", "--meta", "tenant=globex")
+
+    # Assert
+    assert result.returncode == 2
+    assert "more than once" in result.stderr
 
 
 async def test_enqueue_many_shares_meta_across_jobs(app: Akadze) -> None:
