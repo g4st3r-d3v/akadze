@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from akadze.args import argument_model, dump_arguments
-from akadze.enqueue import insert_job, insert_jobs
+from akadze.enqueue import check_options, insert_job, insert_jobs
 from akadze.exc import AkadzeError, EnqueueError
 from akadze.outcome import BackoffPolicy
 
@@ -120,9 +120,17 @@ class BoundTask(Generic[P]):
 
         if self._unique_key is not None:
             raise EnqueueError("unique_key applies to one job; enqueue_many does not take it")
-        payloads = [
-            dump_arguments(self._task.arguments, dict(item), task=self._task.name) for item in items
-        ]
+        if isinstance(items, Mapping | str | bytes):
+            raise EnqueueError("enqueue_many takes an iterable of mappings, not one mapping")
+        check_options(
+            self._priority, self._max_attempts, self._delay, self._run_at, self._expires_at
+        )
+        payloads = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                kind = type(item).__name__
+                raise EnqueueError(f"enqueue_many items must be mappings, got {kind}")
+            payloads.append(dump_arguments(self._task.arguments, dict(item), task=self._task.name))
         await insert_jobs(
             self._session,
             task=self._task.name,

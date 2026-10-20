@@ -38,7 +38,7 @@ async def insert_job(
     expires_at: datetime | None,
     hooks: Hooks,
 ) -> None:
-    _check_options(priority, max_attempts, delay, run_at, expires_at)
+    check_options(priority, max_attempts, delay, run_at, expires_at)
     connection = await _connection(session)
     run_at_sql = _run_at_sql(delay, run_at)
     statement = text(
@@ -93,10 +93,11 @@ async def insert_jobs(
 ) -> None:
     """Insert many jobs with shared options in the caller's transaction, in order."""
 
-    _check_options(priority, max_attempts, delay, run_at, expires_at)
+    check_options(priority, max_attempts, delay, run_at, expires_at)
+    connection = await _connection(session)
     if not args:
         return
-    connection = await _connection(session)
+    returning = f"RETURNING {_COLUMNS}, false AS expired" if hooks.on_enqueue else ""
     statement = text(
         f"""
         INSERT INTO akadze.jobs (
@@ -106,35 +107,39 @@ async def insert_jobs(
                {_run_at_sql(delay, run_at)}, :limit_key, :expires_at
         FROM jsonb_array_elements(CAST(:args AS jsonb)) WITH ORDINALITY AS item (value, position)
         ORDER BY item.position
-        RETURNING {_COLUMNS}, false AS expired
+        {returning}
         """
     )
-    for start in range(0, len(args), _BATCH_ROWS):
-        result = await connection.execute(
-            statement,
-            {
-                "task": task,
-                "queue": queue,
-                "priority": priority,
-                "args": json.dumps(list(args[start : start + _BATCH_ROWS])),
-                "max_attempts": max_attempts,
-                "delay": delay,
-                "run_at": run_at,
-                "limit_key": limit_key or None,
-                "expires_at": expires_at,
-            },
-        )
-        for row in result.mappings().all():
-            await hooks.ran_enqueue(connection, job_from_mapping(row))
+    shared = {
+        "task": task,
+        "queue": queue,
+        "priority": priority,
+        "max_attempts": max_attempts,
+        "delay": delay,
+        "run_at": run_at,
+        "limit_key": limit_key or None,
+        "expires_at": expires_at,
+    }
+    async with connection.begin_nested():
+        for start in range(0, len(args), _BATCH_ROWS):
+            chunk = json.dumps(list(args[start : start + _BATCH_ROWS]))
+            result = await connection.execute(statement, {**shared, "args": chunk})
+            if not returning:
+                continue
+            rows = sorted(result.mappings().all(), key=lambda row: int(row["id"]))
+            for row in rows:
+                await hooks.ran_enqueue(connection, job_from_mapping(row))
 
 
-def _check_options(
+def check_options(
     priority: int,
     max_attempts: int,
     delay: timedelta | None,
     run_at: datetime | None,
     expires_at: datetime | None,
 ) -> None:
+    """Reject enqueue options that cannot form a valid job row. Raises EnqueueError."""
+
     if delay is not None and run_at is not None:
         raise EnqueueError("pass delay or run_at, not both")
     if delay is not None and delay < timedelta(0):
