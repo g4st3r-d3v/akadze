@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from akadze.args import argument_model, dump_arguments
 from akadze.enqueue import insert_job
 from akadze.exc import AkadzeError
+from akadze.outcome import BackoffPolicy
 
 P = ParamSpec("P")
 
@@ -27,7 +28,7 @@ class Task(Generic[P]):
         max_attempts: int,
         timeout: timedelta | None,
         priority: int,
-        backoff: Callable[[int], timedelta] | None = None,
+        backoff: BackoffPolicy | None = None,
     ) -> None:
         self.app = app
         self.name = name

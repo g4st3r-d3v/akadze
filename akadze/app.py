@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from akadze.exc import AkadzeError
 from akadze.hooks import Hooks
+from akadze.outcome import BackoffPolicy
 from akadze.periodic import Schedule, ScheduleSpec, check_schedule
 from akadze.schema import async_database_url
 from akadze.task import Task
@@ -63,7 +65,7 @@ class Akadze:
         max_attempts: int = 3,
         timeout: timedelta | None = None,
         priority: int = 0,
-        backoff: Callable[[int], timedelta] | None = None,
+        backoff: BackoffPolicy | None = None,
     ) -> Task[P]:
         """Bind a callable into the task registry without decorating on ``app``.
 
@@ -74,8 +76,8 @@ class Akadze:
             raise AkadzeError("max_attempts must be at least 1")
         if timeout is not None and timeout <= timedelta(0):
             raise AkadzeError("timeout must be positive")
-        if backoff is not None and not callable(backoff):
-            raise AkadzeError("backoff must be callable")
+        if backoff is not None and (not callable(backoff) or inspect.iscoroutinefunction(backoff)):
+            raise AkadzeError("backoff must be a plain (not async) callable")
         if name in self.tasks:
             raise AkadzeError(f"task {name} is already registered")
         registered: Task[P] = Task(
@@ -99,7 +101,7 @@ class Akadze:
         max_attempts: int = 3,
         timeout: timedelta | None = None,
         priority: int = 0,
-        backoff: Callable[[int], timedelta] | None = None,
+        backoff: BackoffPolicy | None = None,
     ) -> Callable[[Callable[P, Any]], Task[P]]:
         def decorate(fn: Callable[P, Any]) -> Task[P]:
             return self.register(
@@ -125,6 +127,7 @@ class Akadze:
         max_attempts: int = 3,
         timeout: timedelta | None = None,
         timezone: str | None = None,
+        backoff: BackoffPolicy | None = None,
     ) -> Callable[[Callable[..., Any]], Task[Any]]:
         check_schedule(cron, every, timezone)
 
@@ -134,6 +137,7 @@ class Akadze:
                 queue=queue,
                 max_attempts=max_attempts,
                 timeout=timeout,
+                backoff=backoff,
             )(fn)
             self.schedules.append(
                 Schedule(

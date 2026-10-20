@@ -313,6 +313,8 @@ class Worker:
             await _complete_open_run(connection, self.app.hooks, job)
 
         _run, token = bind_run(self.app.engine, finish)
+        registered = self.app.tasks.get(job.task)
+        policy = None if registered is None else registered.backoff
         try:
             try:
                 result = await self._invoke(job)
@@ -324,19 +326,15 @@ class Worker:
                 if _run.done:
                     logger.info("job %s raised after complete_tx", job.id)
                     return
-                await _finish(self.app.engine, self.app.hooks, job, exc, None, self._policy(job))
+                await _finish(self.app.engine, self.app.hooks, job, exc, None, policy)
             else:
                 if _run.done:
                     return
-                await _finish(self.app.engine, self.app.hooks, job, None, result, self._policy(job))
+                await _finish(self.app.engine, self.app.hooks, job, None, result, policy)
         finally:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
-
-    def _policy(self, job: Job) -> BackoffPolicy | None:
-        registered = self.app.tasks.get(job.task)
-        return None if registered is None else registered.backoff
 
     async def _invoke(self, job: Job) -> object:
         async with self.app.engine.connect() as connection:

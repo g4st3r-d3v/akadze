@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 
 from akadze import Akadze, AkadzeError
 from akadze.outcome import backoff
 from akadze.worker import Worker
-from tests.pg import job_row
+from tests.pg import connection, job_row
 
 
 def _boom(attempt: int) -> timedelta:
@@ -27,6 +27,19 @@ def test_default_backoff_is_exponential_with_jitter(attempt: int) -> None:
     assert len(delays) > 1
 
 
+@pytest.mark.parametrize(
+    ("draw", "expected"),
+    [(0.0, timedelta(seconds=2)), (0.5, timedelta(seconds=3))],
+    ids=["floor", "middle"],
+)
+def test_default_backoff_scales_with_the_jitter_draw(draw: float, expected: timedelta) -> None:
+    # Arrange / Act
+    delay = backoff(3, None, jitter=lambda: draw)
+
+    # Assert
+    assert delay == expected
+
+
 def test_default_backoff_stays_under_the_cap() -> None:
     # Arrange / Act
     delay = backoff(40, None)
@@ -40,8 +53,9 @@ def test_default_backoff_stays_under_the_cap() -> None:
     [
         (lambda attempt: timedelta(minutes=attempt), timedelta(minutes=2)),
         (lambda attempt: timedelta(seconds=-5), timedelta(0)),
+        (lambda attempt: timedelta(days=10**6), timedelta(days=365)),
     ],
-    ids=["policy", "negative-is-zero"],
+    ids=["policy", "negative-is-zero", "capped-at-a-year"],
 )
 def test_task_policy_sets_the_delay(policy: object, expected: timedelta) -> None:
     # Arrange / Act
@@ -49,6 +63,14 @@ def test_task_policy_sets_the_delay(policy: object, expected: timedelta) -> None
 
     # Assert
     assert delay == expected
+
+
+def test_negative_retry_delay_means_retry_now() -> None:
+    # Arrange / Act
+    delay = backoff(1, timedelta(seconds=-30))
+
+    # Assert
+    assert delay == timedelta(0)
 
 
 def test_retry_delay_wins_over_the_policy() -> None:
@@ -78,8 +100,35 @@ def test_register_rejects_a_non_callable_backoff(app: Akadze) -> None:
         return None
 
     # Act / Assert
-    with pytest.raises(AkadzeError, match="backoff must be callable"):
+    with pytest.raises(AkadzeError, match="plain"):
         app.register(demo, name="demo", backoff=timedelta(seconds=5))  # type: ignore[arg-type]
+
+
+def test_register_rejects_an_async_backoff(app: Akadze) -> None:
+    # Arrange
+    async def demo() -> None:
+        return None
+
+    async def policy(attempt: int) -> timedelta:
+        return timedelta(minutes=attempt)
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="not async"):
+        app.register(demo, name="demo", backoff=policy)  # type: ignore[arg-type]
+
+
+def test_periodic_task_keeps_its_backoff(app: Akadze) -> None:
+    # Arrange
+    def policy(attempt: int) -> timedelta:
+        return timedelta(minutes=attempt)
+
+    # Act
+    @app.periodic("sync", every=timedelta(minutes=5), backoff=policy)
+    async def sync() -> None:
+        return None
+
+    # Assert
+    assert app.tasks["sync"].backoff is policy
 
 
 async def test_worker_schedules_the_retry_with_the_task_policy(
@@ -100,5 +149,6 @@ async def test_worker_schedules_the_retry_with_the_task_policy(
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["state"] == "queued"
-    wait = row["run_at"] - datetime.now(UTC)
+    async with connection(database_url) as opened:
+        wait = await opened.fetchval("SELECT run_at - now() FROM akadze.jobs")
     assert timedelta(minutes=9) < wait <= timedelta(minutes=10)
