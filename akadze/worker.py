@@ -543,10 +543,10 @@ async def _claim(
                 INSERT INTO akadze.limit_starts (key, started_at)
                 SELECT claimed.limit_key, now()
                 FROM claimed
-                INNER JOIN akadze.limits AS limits
-                    ON limits.key = claimed.limit_key
+                INNER JOIN locked_limits
+                    ON locked_limits.key = claimed.limit_key
                 WHERE claimed.limit_key IS NOT NULL
-                  AND limits.max_starts IS NOT NULL
+                  AND locked_limits.max_starts IS NOT NULL
                 RETURNING key
             ),
             pruned AS (
