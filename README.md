@@ -169,7 +169,9 @@ def send_mail(self, user_id: int) -> None: ...
 async def send_mail(user_id: int) -> None: ...
 ```
 
-`max_attempts` counts every run, so Celery's `max_retries=5` is `max_attempts=6`. There is no `shared_task`: modules expose `register(app)` and the app calls `include`, or a factory binds plain callables with `app.register` (see above).
+`max_attempts` is the attempt budget including the first run, so Celery's `max_retries=5` is `max_attempts=6`. The default is 3: a Celery task without retries that must not run twice (a charge, an SMS) needs `max_attempts=1`. An error, `Retry`, a timeout and a worker lost by another worker's heartbeat check each spend an attempt; `Snooze` and a graceful shutdown do not.
+
+`timeout` is not a hard `time_limit`. When it fires, the run counts as an error and is retried with backoff, not failed. A sync task keeps running in its thread after the timeout, so a retry can overlap it; give sync tasks their own deadline. There is no `shared_task`: modules expose `register(app)` and the app calls `include`, or a factory binds plain callables with `app.register` (see above).
 
 ### 2. Enqueue
 
@@ -179,7 +181,7 @@ async def send_mail(user_id: int) -> None: ...
 | `apply_async(countdown=30)` | `using(..., delay=timedelta(seconds=30))` |
 | `apply_async(eta=dt)` | `using(..., run_at=dt)` (timezone-aware) |
 | `apply_async(expires=dt)` | `using(..., expires_at=dt)` |
-| `apply_async(priority=…)` | `using(..., priority=…)` (higher is claimed first) |
+| `apply_async(priority=…)` | `using(..., priority=…)` — higher is claimed first, smallint range; Celery on Redis treats 0 as highest, so invert those values |
 | `apply_async(task_id=…)` for dedup | `using(..., unique_key=…)` → `DuplicateJob` while active |
 | `transaction.on_commit(lambda: task.delay())` | not needed: `enqueue` runs in the caller's transaction |
 
@@ -194,9 +196,11 @@ Arguments are keyword-only in `enqueue(...)`. Options never go into task argumen
 | retry without spending the budget (polling) | `raise Snooze(timedelta(...))` — does not spend an attempt |
 | `raise Reject(requeue=False)` / give up | `raise Fail("reason")` |
 | `revoke(task_id)` | `request_cancel(session, job_id)` or `akadze jobs cancel JOB_ID`; inside a task `raise Cancel()` |
-| `acks_late` + visibility timeout | lease with heartbeat; a lost worker's jobs return to the queue |
+| `acks_late` + visibility timeout | lease with heartbeat; another worker requeues a lost worker's jobs and spends an attempt (on the last one the job is `failed`) |
 
-Delivery is at least once: a job can run again if its worker disappears, so tasks must be idempotent, as with `acks_late`.
+`request_cancel` does not interrupt a running task. The worker checks it before the run and when the run finishes: a job cancelled mid-run ends `cancelled`, its result is dropped and its `complete_tx` block raises, so writes made there roll back. Side effects outside the database stay.
+
+Delivery is at least once: a job can run again if its worker disappears, so tasks must be idempotent, as with `acks_late`. Size `max_attempts` for crashes too.
 
 ### 4. Chains and results
 
@@ -218,10 +222,11 @@ async def build(report_id: int) -> None:
 | Celery | akadze |
 |---|---|
 | `rate_limit="10/m"` | `set_limit(session, "vendor", max_starts=10, window=timedelta(minutes=1))` + `using(..., limit_key="vendor")` — cluster-wide |
-| a dedicated worker pool for a vendor | `set_limit(session, "vendor", max_running=N)` |
+| a dedicated worker pool for a vendor | `set_limit(session, "vendor", max_running=N)` + `using(..., limit_key="vendor")` |
 | `-Q mail` / routing | `@app.task(..., queue="mail")` and `akadze worker app:app --queue mail` |
-| `--concurrency=8` | `akadze worker app:app --slots 8` |
-| `celery control cancel_consumer` | `akadze queues pause mail` / `resume` |
+| `--concurrency=8` | `akadze worker app:app --slots 8` — slots are per queue: with three `--queue` flags the worker runs up to 24 jobs |
+| stop a queue everywhere | `akadze queues pause mail` / `resume` — cluster-wide, not one worker |
+| `celery control cancel_consumer` on one host | stop that worker (Ctrl-C / SIGTERM): it takes no new jobs and lets running ones finish |
 
 ### 6. Beat
 
@@ -229,7 +234,7 @@ async def build(report_id: int) -> None:
 
 ### 7. Operating it
 
-Flower's screens map to CLI and queries: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID`, and `akadze metrics` for a Prometheus sidecar. Signals (`task_prerun`, `task_postrun`, `task_success`/`task_failure`) map to `app.hooks.before_run`, `after_run` and `on_transition`; transition hooks run in the transaction that changes the job.
+Flower's screens map to CLI and queries: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID`, and `akadze metrics` for a Prometheus sidecar. Signals: `task_prerun` → `app.hooks.before_run`; `task_success` → `app.hooks.after_run`, which runs only when the task returns and inside its timeout (an error there fails the run); `task_postrun`, `task_failure` and `task_retry` → `app.hooks.on_transition`, which sees every state change in the transaction that makes it.
 
 ### What is not there, and why
 
@@ -237,6 +242,8 @@ Flower's screens map to CLI and queries: `akadze jobs list`, `akadze workers lis
 - **Canvas and `.get()`** — chords hold worker slots while waiting; a follow-up on `complete_tx` covers chains without that.
 - **Result backend** — results belong in application tables; `result` on the job row is optional.
 - **HTTP / web UI** — another package can build one on the queries above.
+
+Design reasoning: [akadze-harness](https://github.com/g4st3r-d3v/akadze-harness).
 
 ## Release
 
