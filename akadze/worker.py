@@ -401,6 +401,26 @@ async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> 
         logger.info("job %s queued -> cancelled", job.id)
 
 
+# Claim candidates, instead of every ready row of the queue:
+# - the head of the queue (top `head` rows), skipping keys already at their limit;
+# - the top `scan` rows without a key, and per key for the first _KEY_WALK keys
+#   (index skip-scan). Inside a group, eligibility under limits and fair turns is
+#   a prefix of (priority DESC, run_at, id) and one claim takes at most `limit`
+#   rows; the margin covers rows another claimer holds with SKIP LOCKED.
+# Few keys with deep backlogs are covered by the walk; many small keys by the head.
+_KEY_WALK = 128
+_READY = """j.state = 'queued'
+                      AND j.queue = :queue
+                      AND j.run_at <= now()
+                      AND j.cancel_requested_at IS NULL
+                      AND (j.expires_at IS NULL OR j.expires_at > now())
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM akadze.queue_pauses
+                          WHERE queue_pauses.queue = :queue
+                      )"""
+
+
 async def _claim(
     connection: AsyncConnection,
     *,
@@ -452,19 +472,83 @@ async def _claim(
     result = await connection.execute(
         text(
             f"""
-            WITH ready AS (
-                SELECT j.id, j.limit_key, j.priority, j.run_at
-                FROM akadze.jobs AS j
-                WHERE j.state = 'queued'
-                  AND j.queue = :queue
-                  AND j.run_at <= now()
-                  AND j.cancel_requested_at IS NULL
-                  AND (j.expires_at IS NULL OR j.expires_at > now())
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM akadze.queue_pauses
-                      WHERE queue_pauses.queue = :queue
-                  )
+            WITH RECURSIVE keys AS (
+                (
+                    SELECT j.limit_key, 1 AS depth
+                    FROM akadze.jobs AS j
+                    WHERE j.state = 'queued'
+                      AND j.queue = :queue
+                      AND j.limit_key IS NOT NULL
+                    ORDER BY j.limit_key
+                    LIMIT 1
+                )
+                UNION ALL
+                SELECT (
+                    SELECT j.limit_key
+                    FROM akadze.jobs AS j
+                    WHERE j.state = 'queued'
+                      AND j.queue = :queue
+                      AND j.limit_key > keys.limit_key
+                    ORDER BY j.limit_key
+                    LIMIT 1
+                ), keys.depth + 1
+                FROM keys
+                WHERE keys.limit_key IS NOT NULL
+                  AND keys.depth < :key_walk
+            ),
+            saturated AS (
+                SELECT l.key
+                FROM akadze.limits AS l
+                WHERE (
+                        l.max_running IS NOT NULL
+                        AND (
+                            SELECT count(*)
+                            FROM akadze.jobs AS r
+                            WHERE r.state = 'running' AND r.limit_key = l.key
+                        ) >= l.max_running
+                    )
+                   OR (
+                        l.max_starts IS NOT NULL
+                        AND (
+                            SELECT count(*)
+                            FROM akadze.limit_starts AS m
+                            WHERE m.key = l.key AND m.started_at > now() - l."window"
+                        ) >= l.max_starts
+                    )
+            ),
+            ready AS (
+                SELECT head.id, head.limit_key, head.priority, head.run_at
+                FROM (
+                    SELECT j.id, j.limit_key, j.priority, j.run_at
+                    FROM akadze.jobs AS j
+                    WHERE {_READY}
+                      AND (
+                          j.limit_key IS NULL
+                          OR j.limit_key NOT IN (SELECT saturated.key FROM saturated)
+                      )
+                    ORDER BY j.priority DESC, j.run_at, j.id
+                    LIMIT :head
+                ) AS head
+                UNION
+                SELECT unkeyed.id, unkeyed.limit_key, unkeyed.priority, unkeyed.run_at
+                FROM (
+                    SELECT j.id, j.limit_key, j.priority, j.run_at
+                    FROM akadze.jobs AS j
+                    WHERE {_READY} AND j.limit_key IS NULL
+                    ORDER BY j.priority DESC, j.run_at, j.id
+                    LIMIT :scan
+                ) AS unkeyed
+                UNION
+                SELECT keyed.id, keyed.limit_key, keyed.priority, keyed.run_at
+                FROM keys
+                CROSS JOIN LATERAL (
+                    SELECT j.id, j.limit_key, j.priority, j.run_at
+                    FROM akadze.jobs AS j
+                    WHERE {_READY} AND j.limit_key = keys.limit_key
+                    ORDER BY j.priority DESC, j.run_at, j.id
+                    LIMIT :scan
+                ) AS keyed
+                WHERE keys.limit_key IS NOT NULL
             ),
             locked_limits AS (
                 SELECT l.key, l.max_running, l.max_starts, l."window" AS rate_window
@@ -607,7 +691,14 @@ async def _claim(
             SELECT * FROM claimed
             """
         ),
-        {"queue": queue, "limit": limit, "worker_id": worker_id},
+        {
+            "queue": queue,
+            "limit": limit,
+            "scan": limit * 2,
+            "head": limit * 4,
+            "key_walk": _KEY_WALK,
+            "worker_id": worker_id,
+        },
     )
     claimed = 0
     for row in result.mappings():
