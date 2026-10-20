@@ -494,6 +494,51 @@ async def test_clear_limit_deletes_row(app: Akadze, database_url: str) -> None:
     assert count == 0
 
 
+async def test_clear_limit_deletes_start_marks_for_the_key(app: Akadze, database_url: str) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="vendor", max_starts=1, window=timedelta(hours=1))
+    await apply_limit(app.engine, key="other", max_starts=1, window=timedelta(hours=1))
+    async with connection(database_url) as opened:
+        await opened.execute("INSERT INTO akadze.limit_starts (key) VALUES ('vendor'), ('other')")
+
+    # Act
+    async with app.engine.begin() as session:
+        await clear_limit(session, "vendor")
+
+    # Assert
+    async with connection(database_url) as opened:
+        keys = await opened.fetch("SELECT key FROM akadze.limit_starts ORDER BY key")
+    assert [row["key"] for row in keys] == ["other"]
+
+
+async def test_set_limit_after_clear_counts_starts_from_zero(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> str:
+        return "ok"
+
+    await apply_limit(app.engine, key="vendor", max_starts=1, window=timedelta(hours=1))
+    async with connection(database_url) as opened:
+        await opened.execute("INSERT INTO akadze.limit_starts (key) VALUES ('vendor')")
+    async with app.engine.begin() as session:
+        await clear_limit(session, "vendor")
+        await set_limit(session, "vendor", max_starts=1, window=timedelta(hours=1))
+        await demo.using(session=session, limit_key="vendor").enqueue()
+
+    # Act
+    worker = Worker(app)
+    await worker.register()
+    await worker.claim_available()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "running"
+    await worker.shutdown()
+
+
 async def test_clear_limit_is_idempotent(app: Akadze) -> None:
     # Arrange / Act
     async with app.engine.begin() as session:
