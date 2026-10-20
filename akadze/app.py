@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from akadze.exc import AkadzeError
 from akadze.hooks import Hooks
-from akadze.periodic import Schedule, ScheduleSpec, check_timezone
+from akadze.periodic import Schedule, ScheduleSpec, check_schedule
 from akadze.schema import async_database_url
 from akadze.task import Task
 
@@ -120,11 +120,7 @@ class Akadze:
         timeout: timedelta | None = None,
         timezone: str | None = None,
     ) -> Callable[[Callable[..., Any]], Task[Any]]:
-        if (cron is None) == (every is None):
-            raise AkadzeError("periodic needs cron or every")
-        if every is not None and every <= timedelta(0):
-            raise AkadzeError("every must be positive")
-        check_timezone(timezone, every=every)
+        check_schedule(cron, every, timezone)
 
         def decorate(fn: Callable[..., Any]) -> Task[Any]:
             registered = self.task(
@@ -164,11 +160,7 @@ class Akadze:
         """
         if name not in self.tasks:
             raise AkadzeError(f"task {name} is not registered")
-        if (cron is None) == (every is None):
-            raise AkadzeError("schedule needs cron or every")
-        if every is not None and every <= timedelta(0):
-            raise AkadzeError("every must be positive")
-        check_timezone(timezone, every=every)
+        check_schedule(cron, every, timezone)
         resolved = queue if queue is not None else self.tasks[name].queue
         self.schedules.append(
             Schedule(
