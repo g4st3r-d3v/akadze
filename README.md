@@ -153,17 +153,90 @@ Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The d
 
 ## Celery migration
 
-Primitives map to familiar Celery habits; there is no Redis/Rabbit broker and no canvas/chord.
+A how-to for moving a Celery app onto akadze. The broker is the application's Postgres, so moving means deploying `akadze migrate`, porting task definitions and call sites, and replacing `celery beat` with the worker's own schedules.
 
-| Habit | akadze |
+### 1. Define tasks
+
+Celery tasks are sync functions bound to a global app. akadze tasks are usually `async def`; a sync function also works and runs in a thread. Arguments must be JSON-serializable: they are validated by a model built from the signature and stored in `akadze.jobs.args`.
+
+```python
+# Celery
+@shared_task(bind=True, max_retries=5, queue="mail", time_limit=60)
+def send_mail(self, user_id: int) -> None: ...
+
+# akadze
+@app.task("mail.send", queue="mail", max_attempts=6, timeout=timedelta(seconds=60))
+async def send_mail(user_id: int) -> None: ...
+```
+
+`max_attempts` counts every run, so Celery's `max_retries=5` is `max_attempts=6`. There is no `shared_task`: modules expose `register(app)` and the app calls `include`, or a factory binds plain callables with `app.register` (see above).
+
+### 2. Enqueue
+
+| Celery | akadze |
 |---|---|
-| Dedup / task id | `using(..., unique_key=...)` → `DuplicateJob` if still active |
-| Concurrency / rate | `using(..., limit_key=...)` + `set_limit` / `clear_limit` |
-| Follow-up in the same tx | `async with current().complete_tx() as connection:` then `using(session=connection).enqueue(...)` |
-| Countdown / “sleep and retry” | `raise Snooze(timedelta(...))` (does not spend an attempt); or `using(..., delay=... \| run_at=...)` |
-| Beat | `@app.periodic` / schedules inside the worker (`akadze beat` is a stub) |
+| `send_mail.delay(7)` | `await send_mail.using(session=connection).enqueue(user_id=7)` |
+| `apply_async(countdown=30)` | `using(..., delay=timedelta(seconds=30))` |
+| `apply_async(eta=dt)` | `using(..., run_at=dt)` (timezone-aware) |
+| `apply_async(expires=dt)` | `using(..., expires_at=dt)` |
+| `apply_async(priority=…)` | `using(..., priority=…)` (higher is claimed first) |
+| `apply_async(task_id=…)` for dedup | `using(..., unique_key=…)` → `DuplicateJob` while active |
+| `transaction.on_commit(lambda: task.delay())` | not needed: `enqueue` runs in the caller's transaction |
 
-Enqueue options go through `using(...)`, not as task kwargs. No `.get()` / result backend; count outcomes in hooks or ops queries.
+Arguments are keyword-only in `enqueue(...)`. Options never go into task arguments.
+
+### 3. Retries and control flow
+
+| Celery | akadze |
+|---|---|
+| `raise self.retry(countdown=10)` | `raise Retry(timedelta(seconds=10))` — spends an attempt |
+| `autoretry_for=(Exception,)` | default: any exception retries with backoff until `max_attempts` |
+| retry without spending the budget (polling) | `raise Snooze(timedelta(...))` — does not spend an attempt |
+| `raise Reject(requeue=False)` / give up | `raise Fail("reason")` |
+| `revoke(task_id)` | `request_cancel(session, job_id)` or `akadze jobs cancel JOB_ID`; inside a task `raise Cancel()` |
+| `acks_late` + visibility timeout | lease with heartbeat; a lost worker's jobs return to the queue |
+
+Delivery is at least once: a job can run again if its worker disappears, so tasks must be idempotent, as with `acks_late`.
+
+### 4. Chains and results
+
+There is no canvas (`chain`, `group`, `chord`) and no result backend or `.get()`. To run a follow-up only when a step succeeds, enqueue it on the `complete_tx` connection. Write the outcome into your own tables in the same transaction instead of reading it back from the queue.
+
+```python
+from akadze import current
+
+@app.task("report.build")
+async def build(report_id: int) -> None:
+    ...
+    async with current().complete_tx() as connection:
+        await connection.execute(...)  # mark the report built
+        await notify.using(session=connection).enqueue(report_id=report_id)
+```
+
+### 5. Limits and routing
+
+| Celery | akadze |
+|---|---|
+| `rate_limit="10/m"` | `set_limit(session, "vendor", max_starts=10, window=timedelta(minutes=1))` + `using(..., limit_key="vendor")` — cluster-wide |
+| a dedicated worker pool for a vendor | `set_limit(session, "vendor", max_running=N)` |
+| `-Q mail` / routing | `@app.task(..., queue="mail")` and `akadze worker app:app --queue mail` |
+| `--concurrency=8` | `akadze worker app:app --slots 8` |
+| `celery control cancel_consumer` | `akadze queues pause mail` / `resume` |
+
+### 6. Beat
+
+`celery beat` and its schedule move into the worker: `@app.periodic("name", cron="0 * * * *")` or `every=timedelta(...)`, or `app.add_schedules([...])` from the application's config. Every worker runs the schedule; a due slot is enqueued once. There is no separate beat process (`akadze beat` is a stub).
+
+### 7. Operating it
+
+Flower's screens map to CLI and queries: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID`, and `akadze metrics` for a Prometheus sidecar. Signals (`task_prerun`, `task_postrun`, `task_success`/`task_failure`) map to `app.hooks.before_run`, `after_run` and `on_transition`; transition hooks run in the transaction that changes the job.
+
+### What is not there, and why
+
+- **Redis/RabbitMQ brokers** — Postgres is the broker so enqueue can share the application's transaction.
+- **Canvas and `.get()`** — chords hold worker slots while waiting; a follow-up on `complete_tx` covers chains without that.
+- **Result backend** — results belong in application tables; `result` on the job row is optional.
+- **HTTP / web UI** — another package can build one on the queries above.
 
 ## Release
 
