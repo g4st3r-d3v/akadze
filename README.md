@@ -119,7 +119,7 @@ app.add_schedule("ops.prune", every=timedelta(seconds=30), overlap=False)
 # or many: app.add_schedules([{"name": "ops.prune", "cron": "0 * * * *"}, ...])
 ```
 
-`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
+`akadze.jobs.state` is then `succeeded`. A higher `priority` is claimed first. `result` is optional. Pass enqueue options (`delay`, `run_at`, `priority`, `max_attempts`, `unique_key`, `limit_key`, `expires_at`) through `using(...)`, not as task arguments. `priority` and `max_attempts` override the task defaults for that one job; `max_attempts` must be between 1 and 2147483647, otherwise `EnqueueError` is raised and nothing is inserted. `expires_at` must be timezone-aware. A job that has already expired is cancelled before it runs. A second enqueue with the same active `unique_key` raises `DuplicateJob` and does not abort the rest of the caller's transaction.
 
 Enqueue the follow-up job on the `complete_tx` connection so it commits only if this job succeeds:
 

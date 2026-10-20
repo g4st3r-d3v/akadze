@@ -178,3 +178,89 @@ async def test_expires_at_cancels_before_the_task_runs(app: Akadze, database_url
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["state"] == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [(None, 3), (10, 10)],
+    ids=["task-default", "per-job"],
+)
+async def test_using_max_attempts_sets_the_job_ceiling(
+    app: Akadze,
+    database_url: str,
+    override: int | None,
+    expected: int,
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        return None
+
+    # Act
+    async with app.engine.begin() as session:
+        await demo.using(session=session, max_attempts=override).enqueue()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["max_attempts"] == expected
+
+
+@pytest.mark.parametrize("max_attempts", [0, -1, 2**31], ids=["zero", "negative", "above-int4"])
+async def test_using_rejects_max_attempts_out_of_range(
+    app: Akadze, database_url: str, max_attempts: int
+) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(EnqueueError, match="max_attempts must be between 1 and 2147483647"):
+        async with app.engine.begin() as session:
+            await demo.using(session=session, max_attempts=max_attempts).enqueue()
+    assert await job_rows(database_url) == []
+
+
+async def test_per_job_max_attempts_keeps_retrying_past_the_task_default(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=1)
+    async def demo() -> None:
+        raise RuntimeError("boom")
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session, max_attempts=2).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "queued"
+    assert row["attempt"] == 1
+
+
+async def test_per_job_max_attempts_below_the_task_default_fails_early(
+    app: Akadze,
+    database_url: str,
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=5)
+    async def demo() -> None:
+        raise RuntimeError("boom")
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session, max_attempts=1).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "failed"
+    assert row["attempt"] == 1
