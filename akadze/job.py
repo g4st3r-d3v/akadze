@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -30,6 +30,7 @@ _COLUMN_NAMES = (
     "result",
     "cancel_requested_at",
     "expires_at",
+    "meta",
 )
 _COLUMNS = ", ".join(_COLUMN_NAMES)
 
@@ -58,6 +59,7 @@ class Job:
     cancel_requested_at: datetime | None
     expires_at: datetime | None
     expired: bool = False
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 def _decode_json(value: Any) -> Any:
@@ -72,6 +74,7 @@ def job_from_mapping(row: RowMapping) -> Job:
     result = _decode_json(row["result"])
     worker_id = row["worker_id"]
     expired = bool(row["expired"]) if "expired" in row else False
+    meta = _decode_json(row["meta"]) if "meta" in row else {}
     return Job(
         id=int(row["id"]),
         task=str(row["task"]),
@@ -91,6 +94,7 @@ def job_from_mapping(row: RowMapping) -> Job:
         cancel_requested_at=row["cancel_requested_at"],
         expires_at=row["expires_at"],
         expired=expired,
+        meta=dict(meta) if isinstance(meta, dict) else {},
     )
 
 

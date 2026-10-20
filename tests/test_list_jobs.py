@@ -93,7 +93,6 @@ async def test_list_jobs_summary_has_no_args(app: Akadze, fake) -> None:
     assert "args" not in names
     assert "result" not in names
     assert "errors" not in names
-    assert "meta" not in names
     assert names == {
         "id",
         "task",
@@ -105,6 +104,7 @@ async def test_list_jobs_summary_has_no_args(app: Akadze, fake) -> None:
         "run_at",
         "started_at",
         "finished_at",
+        "meta",
     }
 
 

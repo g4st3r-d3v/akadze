@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from types import MappingProxyType
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from akadze.exc import AkadzeError
+from akadze.enqueue import dump_meta
+from akadze.exc import AkadzeError, EnqueueError
+from akadze.job import _decode_json
 
 _JOB_STATES = frozenset({"queued", "running", "succeeded", "failed", "cancelled"})
 _LIMIT_MIN = 1
@@ -42,6 +47,7 @@ class JobSummary:
     run_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    meta: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}), hash=False)
 
 
 async def queue_snapshot(engine: AsyncEngine) -> QueueSnapshot:
@@ -87,8 +93,12 @@ async def list_jobs(
     queue: str | None = None,
     state: str | None = None,
     limit: int = _LIMIT_DEFAULT,
+    meta: Mapping[str, Any] | None = None,
 ) -> tuple[JobSummary, ...]:
-    """Return job summaries. Optional filters; does not mutate rows."""
+    """Return job summaries. Optional filters; does not mutate rows.
+
+    ``meta`` keeps jobs whose metadata contains every given key/value.
+    """
 
     if not _LIMIT_MIN <= limit <= _LIMIT_MAX:
         raise AkadzeError(f"limit must be between {_LIMIT_MIN} and {_LIMIT_MAX}")
@@ -103,6 +113,12 @@ async def list_jobs(
     if state is not None:
         clauses.append("state = :state")
         params["state"] = state
+    if meta is not None:
+        try:
+            params["meta"] = dump_meta(meta)
+        except EnqueueError as exc:
+            raise AkadzeError(str(exc)) from None
+        clauses.append("meta @> CAST(:meta AS jsonb)")
     where = " AND ".join(clauses)
 
     async with engine.connect() as connection:
@@ -111,7 +127,7 @@ async def list_jobs(
                 f"""
                 SELECT
                     id, task, queue, state, priority, attempt, max_attempts,
-                    run_at, started_at, finished_at
+                    run_at, started_at, finished_at, meta
                 FROM akadze.jobs
                 WHERE {where}
                 ORDER BY priority DESC, run_at, id
@@ -132,6 +148,12 @@ async def list_jobs(
                 run_at=row.run_at,
                 started_at=row.started_at,
                 finished_at=row.finished_at,
+                meta=MappingProxyType(_as_meta(row.meta)),
             )
             for row in rows
         )
+
+
+def _as_meta(value: object) -> dict[str, Any]:
+    decoded = _decode_json(value)
+    return dict(decoded) if isinstance(decoded, dict) else {}

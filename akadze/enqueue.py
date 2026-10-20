@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -21,6 +21,7 @@ _PRIORITY_MIN = -32768
 _PRIORITY_MAX = 32767
 _MAX_ATTEMPTS_MAX = 2147483647
 _BATCH_ROWS = 1000
+_META_MAX_BYTES = 8192
 
 
 async def insert_job(
@@ -37,7 +38,9 @@ async def insert_job(
     run_at: datetime | None,
     expires_at: datetime | None,
     hooks: Hooks,
+    meta: Mapping[str, Any] | None = None,
 ) -> None:
+    meta_json = dump_meta(meta)
     check_options(priority, max_attempts, delay, run_at, expires_at)
     connection = await _connection(session)
     run_at_sql = _run_at_sql(delay, run_at)
@@ -45,11 +48,11 @@ async def insert_job(
         f"""
         INSERT INTO akadze.jobs (
             task, queue, priority, state, args, max_attempts, run_at, unique_key,
-            limit_key, expires_at
+            limit_key, expires_at, meta
         )
         VALUES (
             :task, :queue, :priority, 'queued', CAST(:args AS jsonb), :max_attempts,
-            {run_at_sql}, :unique_key, :limit_key, :expires_at
+            {run_at_sql}, :unique_key, :limit_key, :expires_at, CAST(:meta AS jsonb)
         )
         RETURNING {_COLUMNS}, false AS expired
         """
@@ -65,6 +68,7 @@ async def insert_job(
         "unique_key": unique_key,
         "limit_key": limit_key or None,
         "expires_at": expires_at,
+        "meta": meta_json,
     }
     try:
         async with connection.begin_nested():
@@ -90,9 +94,11 @@ async def insert_jobs(
     run_at: datetime | None,
     expires_at: datetime | None,
     hooks: Hooks,
+    meta: Mapping[str, Any] | None = None,
 ) -> None:
     """Insert many jobs with shared options in the caller's transaction, in order."""
 
+    meta_json = dump_meta(meta)
     check_options(priority, max_attempts, delay, run_at, expires_at)
     connection = await _connection(session)
     if not args:
@@ -101,10 +107,11 @@ async def insert_jobs(
     statement = text(
         f"""
         INSERT INTO akadze.jobs (
-            task, queue, priority, state, args, max_attempts, run_at, limit_key, expires_at
+            task, queue, priority, state, args, max_attempts, run_at, limit_key, expires_at,
+            meta
         )
         SELECT :task, :queue, :priority, 'queued', item.value, :max_attempts,
-               {_run_at_sql(delay, run_at)}, :limit_key, :expires_at
+               {_run_at_sql(delay, run_at)}, :limit_key, :expires_at, CAST(:meta AS jsonb)
         FROM jsonb_array_elements(CAST(:args AS jsonb)) WITH ORDINALITY AS item (value, position)
         ORDER BY item.position
         {returning}
@@ -119,6 +126,7 @@ async def insert_jobs(
         "run_at": run_at,
         "limit_key": limit_key or None,
         "expires_at": expires_at,
+        "meta": meta_json,
     }
     async with connection.begin_nested():
         for start in range(0, len(args), _BATCH_ROWS):
@@ -160,6 +168,37 @@ def _run_at_sql(delay: timedelta | None, run_at: datetime | None) -> str:
     if run_at is not None:
         return ":run_at"
     return "now()"
+
+
+def dump_meta(meta: Mapping[str, Any] | None) -> str:
+    """Validate job metadata and return it as JSON text. Raises EnqueueError.
+
+    Postgres jsonb is the target: keys must be str at every level, and NaN,
+    infinities, NUL characters and lone surrogates are rejected up front.
+    """
+
+    if meta is None:
+        return "{}"
+    if not isinstance(meta, Mapping) or not _str_keys(meta):
+        raise EnqueueError("meta must be a mapping with str keys")
+    try:
+        encoded = json.dumps(dict(meta), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        size = len(encoded.encode())
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise EnqueueError("meta must be JSON-serializable") from None
+    if "\\u0000" in encoded:
+        raise EnqueueError("meta must not contain NUL characters")
+    if size > _META_MAX_BYTES:
+        raise EnqueueError(f"meta must be at most {_META_MAX_BYTES} bytes as JSON")
+    return encoded
+
+
+def _str_keys(value: object) -> bool:
+    if isinstance(value, Mapping):
+        return all(isinstance(key, str) and _str_keys(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return all(_str_keys(item) for item in value)
+    return True
 
 
 async def request_cancel(session: AsyncConnection | AsyncSession, job_id: int) -> None:

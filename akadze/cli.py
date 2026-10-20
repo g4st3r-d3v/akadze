@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import json
 import os
 import signal
 import sys
@@ -50,6 +51,13 @@ def main(argv: list[str] | None = None) -> int:
     jobs_list.add_argument("--queue", default=None)
     jobs_list.add_argument("--state", default=None)
     jobs_list.add_argument("--limit", type=int, default=50)
+    jobs_list.add_argument(
+        "--meta",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Keep jobs whose meta has KEY equal to VALUE (JSON if it parses, else text)",
+    )
     jobs_requeue = jobs_sub.add_parser("requeue", help="Return a failed job to the queue")
     jobs_requeue.add_argument("job_id", type=int)
     jobs_cancel = jobs_sub.add_parser("cancel", help="Request cancel for a queued or running job")
@@ -92,7 +100,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_worker(args.app, slots=args.slots, queues=args.queues)
     if args.command == "jobs":
         if args.jobs_command == "list":
-            return _run_jobs_list(queue=args.queue, state=args.state, limit=args.limit)
+            return _run_jobs_list(
+                queue=args.queue, state=args.state, limit=args.limit, meta=args.meta
+            )
         if args.jobs_command == "requeue":
             return _run_jobs_requeue(args.job_id)
         if args.jobs_command == "cancel":
@@ -161,12 +171,21 @@ def _require_database_url() -> str | None:
     return database_url
 
 
-def _run_jobs_list(*, queue: str | None, state: str | None, limit: int) -> int:
+def _run_jobs_list(
+    *, queue: str | None, state: str | None, limit: int, meta: list[str] | None = None
+) -> int:
+    try:
+        filters = _parse_meta(meta or [])
+    except AkadzeError as exc:
+        print(f"jobs list: {exc}", file=sys.stderr)
+        return 2
     database_url = _require_database_url()
     if database_url is None:
         return 2
     try:
-        summaries = asyncio.run(_list_jobs(database_url, queue=queue, state=state, limit=limit))
+        summaries = asyncio.run(
+            _list_jobs(database_url, queue=queue, state=state, limit=limit, meta=filters)
+        )
     except (AkadzeError, ValueError, OSError, SQLAlchemyError) as exc:
         print(f"jobs list failed: {redact_database_url(str(exc), database_url)}", file=sys.stderr)
         return 1
@@ -181,10 +200,11 @@ async def _list_jobs(
     queue: str | None,
     state: str | None,
     limit: int,
+    meta: dict[str, object] | None = None,
 ) -> tuple[JobSummary, ...]:
     engine = _cli_engine(database_url)
     try:
-        return await list_jobs(engine, queue=queue, state=state, limit=limit)
+        return await list_jobs(engine, queue=queue, state=state, limit=limit, meta=meta)
     finally:
         await engine.dispose()
 
@@ -380,8 +400,24 @@ def _format_job_line(job: JobSummary) -> str:
         f"id={job.id} task={job.task} queue={job.queue} state={job.state} "
         f"priority={job.priority} attempt={job.attempt} max_attempts={job.max_attempts} "
         f"run_at={_format_dt(job.run_at)} started_at={_format_dt(job.started_at)} "
-        f"finished_at={_format_dt(job.finished_at)}"
+        f"finished_at={_format_dt(job.finished_at)} "
+        f"meta={json.dumps(dict(job.meta), separators=(',', ':'), sort_keys=True)}"
     )
+
+
+def _parse_meta(pairs: list[str]) -> dict[str, object]:
+    filters: dict[str, object] = {}
+    for pair in pairs:
+        key, sep, raw = pair.partition("=")
+        if not sep or not key:
+            raise AkadzeError(f"--meta expects KEY=VALUE, got {pair!r}")
+        if key in filters:
+            raise AkadzeError(f"--meta {key} given more than once")
+        try:
+            filters[key] = json.loads(raw)
+        except ValueError:
+            filters[key] = raw
+    return filters
 
 
 def _format_limit_line(limit: LimitSummary) -> str:
