@@ -610,19 +610,18 @@ async def _claim(
                     ON running.limit_key = ready.limit_key
                 LEFT JOIN starts
                     ON starts.limit_key = ready.limit_key
-                WHERE (
+                WHERE ready.limit_key IS NULL
+                   OR (
                         locked_limits.key IS NULL
-                        AND (
-                            ready.limit_key IS NULL
-                            OR NOT EXISTS (
-                                SELECT 1
-                                FROM akadze.limits AS policy
-                                WHERE policy.key = ready.limit_key
-                            )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM akadze.limits AS policy
+                            WHERE policy.key = ready.limit_key
                         )
                    )
                    OR (
-                        (
+                        locked_limits.key IS NOT NULL
+                        AND (
                             locked_limits.max_running IS NULL
                             OR coalesce(running.running_count, 0)
                                < locked_limits.max_running
@@ -704,12 +703,19 @@ async def _claim(
                   AND locked_limits.max_starts IS NOT NULL
                 RETURNING key
             ),
+            expired_marks AS (
+                SELECT marks.id
+                FROM akadze.limit_starts AS marks
+                INNER JOIN locked_limits
+                    ON locked_limits.key = marks.key
+                WHERE locked_limits.rate_window IS NOT NULL
+                  AND marks.started_at < now() - locked_limits.rate_window
+                FOR UPDATE OF marks SKIP LOCKED
+            ),
             pruned AS (
                 DELETE FROM akadze.limit_starts AS marks
-                USING locked_limits
-                WHERE marks.key = locked_limits.key
-                  AND locked_limits.rate_window IS NOT NULL
-                  AND marks.started_at < now() - locked_limits.rate_window
+                USING expired_marks
+                WHERE marks.id = expired_marks.id
                 RETURNING marks.id
             )
             SELECT claimed.*, (SELECT count(*) FROM ready) AS ready_rows FROM claimed
