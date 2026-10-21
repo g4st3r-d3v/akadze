@@ -21,11 +21,11 @@ _UNREACHABLE = "postgresql+asyncpg://akadze:secret-pw@127.0.0.1:1/akadze"
 
 
 async def _until(predicate_sql: str, database_url: str, seconds: float = 5) -> None:
-    async with connection(database_url) as opened:
-        for _ in range(int(seconds / 0.02)):
+    for _ in range(int(seconds / 0.02)):
+        async with connection(database_url) as opened:
             if await opened.fetchval(predicate_sql):
                 return
-            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.02)
     raise AssertionError(f"timed out waiting for: {predicate_sql}")
 
 
@@ -66,7 +66,7 @@ async def test_worker_keeps_serving_after_its_connections_are_killed(
 
         # Assert
         assert not serve_task.done()
-        assert "database error, retrying" in caplog.text
+        assert "failed, retrying" in caplog.text
     finally:
         stop.set()
         await asyncio.wait_for(serve_task, timeout=5)
@@ -145,3 +145,110 @@ def test_cli_worker_reports_a_rejected_login_without_the_password(
     assert err.startswith("worker failed: ")
     assert "secret-pw" not in err
     assert "Traceback" not in err
+
+
+def test_error_backoff_stays_at_the_heartbeat_interval_after_many_failures(app: Akadze) -> None:
+    # Arrange
+    worker = Worker(app, heartbeat_interval=timedelta(seconds=5))
+
+    # Act
+    delay = worker._error_delay(5000)
+
+    # Assert
+    assert 2.5 <= delay <= 5
+
+
+async def test_outcome_is_recorded_once_after_the_database_comes_back(
+    app: Akadze, database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange
+    calls = 0
+    reachable = app.engine
+    unreachable = create_async_engine(_UNREACHABLE)
+
+    @app.task("demo")
+    async def demo() -> str:
+        nonlocal calls
+        calls += 1
+        return "done"
+
+    async def restore_later() -> None:
+        await asyncio.sleep(0.3)
+        app.engine = reachable
+
+    restorer: list[asyncio.Task[None]] = []
+
+    def lose_database(_: object) -> None:
+        app.engine = unreachable
+        restorer.append(asyncio.create_task(restore_later()))
+
+    app.hooks.after_run.append(lose_database)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        heartbeat_interval=timedelta(milliseconds=50),
+        poll_interval=timedelta(milliseconds=10),
+    )
+    stop = asyncio.Event()
+    serve_task = asyncio.create_task(worker.serve(stop))
+    caplog.set_level(logging.WARNING, logger="akadze")
+
+    # Act
+    try:
+        await _until(
+            "SELECT count(*) FROM akadze.jobs WHERE task = 'demo' AND state = 'succeeded'",
+            database_url,
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        stop.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+        await asyncio.gather(*restorer)
+        app.engine = reachable
+        await unreachable.dispose()
+
+    # Assert
+    assert calls == 1
+    assert "outcome not recorded, retrying" in caplog.text
+
+
+async def test_a_hanging_heartbeat_stops_the_worker_within_the_ttl(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.task("block")
+    async def block() -> None:
+        started.set()
+        await release.wait()
+
+    async with app.engine.begin() as session:
+        await block.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        heartbeat_interval=timedelta(milliseconds=50),
+        heartbeat_ttl=timedelta(milliseconds=500),
+        poll_interval=timedelta(milliseconds=10),
+    )
+    serve_task = asyncio.create_task(worker.serve(asyncio.Event()))
+    async with connection(database_url) as holder:
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            transaction = holder.transaction()
+            await transaction.start()
+            await holder.execute("SELECT 1 FROM akadze.workers FOR UPDATE")
+
+            # Act
+            await asyncio.wait_for(serve_task, timeout=3)
+        finally:
+            release.set()
+            if not serve_task.done():
+                serve_task.cancel()
+                await asyncio.gather(serve_task, return_exceptions=True)
+
+    # Assert
+    assert worker._abandon is True
+    assert serve_task.exception() is None

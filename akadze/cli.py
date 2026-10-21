@@ -28,9 +28,10 @@ from akadze.schema import (
     applied_versions,
     async_database_url,
     migrate,
+    public_db_error,
     redact_database_url,
 )
-from akadze.worker import Worker, WorkerSummary, list_workers, public_db_error
+from akadze.worker import Worker, WorkerSummary, list_workers
 
 
 def main(argv: list[str] | None = None) -> int:

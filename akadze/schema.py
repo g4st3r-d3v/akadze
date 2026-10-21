@@ -9,11 +9,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 _MIGRATIONS = Path(__file__).resolve().parent / "sql"
+_PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
+_ERROR_MESSAGE_LIMIT = 200
 _LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('akadze.migrate'))"
 _BOOTSTRAP_SQL = (
     "CREATE SCHEMA IF NOT EXISTS akadze",
@@ -46,11 +48,35 @@ def redact_database_url(message: str, database_url: str) -> str:
         redacted = redacted.replace(async_database_url(database_url), "postgresql://***")
     except ValueError:
         pass
-    redacted = re.sub(r"://[^\s/@]+:[^\s/@]+@", "://***@", redacted)
+    redacted = _PASSWORD_IN_URL.sub("://***@", redacted)
     password = urlparse(database_url).password
     if password is not None and len(password) >= 4:
         redacted = redacted.replace(password, "***")
     return redacted
+
+
+def public_db_error(exc: BaseException) -> str:
+    """Describe a database error for a log line: no SQL, no parameters, no password.
+
+    Connection-level errors keep the first line of the driver message, which
+    says what happened to the connection. Other errors keep only their name and
+    SQLSTATE, because driver messages can quote the values that were sent.
+    """
+
+    name = type(exc).__name__
+    cause = exc.orig if isinstance(exc, DBAPIError) else None
+    if isinstance(exc, InterfaceError | OperationalError) or (
+        isinstance(exc, DBAPIError) and exc.connection_invalidated
+    ):
+        detail = str(cause if cause is not None else exc)
+    elif isinstance(exc, OSError):
+        detail = str(exc)
+    else:
+        sqlstate = getattr(cause, "sqlstate", None)
+        return f"{name} (SQLSTATE {sqlstate})" if sqlstate else name
+    first = detail.strip().splitlines()[0] if detail.strip() else ""
+    first = _PASSWORD_IN_URL.sub("://***@", first)[:_ERROR_MESSAGE_LIMIT]
+    return f"{name}: {first}" if first else name
 
 
 def _engine(database_url: str) -> AsyncEngine:

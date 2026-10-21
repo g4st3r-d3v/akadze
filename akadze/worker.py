@@ -8,10 +8,9 @@ import json
 import logging
 import os
 import random
-import re
 import socket
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
@@ -19,7 +18,7 @@ from typing import Any, TypeGuard
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from akadze.args import load_arguments
@@ -38,6 +37,7 @@ from akadze.job import (
 from akadze.maintenance import prune, rescue
 from akadze.outcome import BackoffPolicy, decide, push_error
 from akadze.periodic import schedule_due
+from akadze.schema import public_db_error
 
 logger = logging.getLogger("akadze")
 
@@ -110,23 +110,8 @@ def poll_delay(seconds: float, unit: float) -> float:
 
 
 _ERROR_DELAY_FLOOR = 0.1
-_ERROR_MESSAGE_LIMIT = 200
-_PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
-
-
-def public_db_error(exc: BaseException) -> str:
-    """Name and driver message of a database error, without SQL or parameters."""
-
-    cause = exc.orig if isinstance(exc, DBAPIError) and exc.orig is not None else None
-    if cause is not None:
-        detail = str(cause).strip()
-    elif isinstance(exc, SQLAlchemyError):
-        detail = ""
-    else:
-        detail = str(exc).strip()
-    detail = _PASSWORD_IN_URL.sub("://***@", detail)[:_ERROR_MESSAGE_LIMIT]
-    name = type(exc).__name__
-    return f"{name}: {detail}" if detail else name
+_ERROR_DELAY_MAX_DOUBLINGS = 16
+_DB_ERRORS = (SQLAlchemyError, OSError)
 
 
 class _Lost(Exception):
@@ -183,6 +168,7 @@ class Worker:
             )
 
     async def heartbeat(self) -> None:
+        started = time.monotonic()
         async with self.app.engine.begin() as connection:
             updated = await connection.execute(
                 text(
@@ -210,7 +196,7 @@ class Worker:
                         "queues": self.queues,
                     },
                 )
-        self._last_heartbeat_ok = time.monotonic()
+        self._last_heartbeat_ok = started
 
     async def claim_available(self) -> None:
         """Claim up to the free slots, one transaction per queue.
@@ -266,8 +252,10 @@ class Worker:
     async def serve(self, stop: asyncio.Event) -> None:
         """Run until stop is set or no heartbeat succeeds within heartbeat_ttl.
 
-        Database errors in the loop are logged and retried with backoff; they
-        stop the worker only through the stale heartbeat.
+        Each step (heartbeat, rescue, prune, schedules, claim) runs on its own:
+        a database error in one is logged and the loop backs off, and no step
+        may run past the heartbeat deadline. Errors stop the worker only
+        through the stale heartbeat, before other workers rescue its jobs.
         """
 
         await self.register()
@@ -278,27 +266,28 @@ class Worker:
         try:
             while not stop.is_set():
                 now = time.monotonic()
-                if now - self._last_heartbeat_ok > self.heartbeat_ttl.total_seconds():
+                if self._stale():
                     logger.info("worker %s heartbeat is stale; stopping", self.id)
                     self._abandon = True
                     return
-                try:
-                    if now >= next_heartbeat:
-                        await self.heartbeat()
-                        await rescue(self.app.engine, self.app.hooks, ttl=self.heartbeat_ttl)
+                ok = True
+                if now >= next_heartbeat:
+                    if await self._step("heartbeat", self.heartbeat):
                         next_heartbeat = now + self.heartbeat_interval.total_seconds()
-                    if now >= next_prune:
-                        await prune(self.app.engine, retention=self.app.retention)
+                        ok &= await self._step("rescue", self._rescue)
+                    else:
+                        ok = False
+                if now >= next_prune:
+                    if await self._step("prune", self._prune):
                         next_prune = now + 60
-                    await schedule_due(self.app)
-                    if stop.is_set():
-                        break
-                    await self._spawn()
-                except (SQLAlchemyError, OSError) as exc:
+                    else:
+                        ok = False
+                ok &= await self._step("schedule", self._schedule)
+                if stop.is_set():
+                    break
+                ok &= await self._step("claim", self._spawn)
+                if not ok:
                     failures += 1
-                    logger.warning(
-                        "worker %s database error, retrying: %s", self.id, public_db_error(exc)
-                    )
                     await self._wait(stop, self._error_delay(failures))
                     continue
                 failures = 0
@@ -313,11 +302,39 @@ class Worker:
     async def _pause(self, stop: asyncio.Event) -> None:
         await self._wait(stop, poll_delay(self.poll_interval.total_seconds(), random.random()))
 
+    def _stale(self) -> bool:
+        return self._heartbeat_left() <= 0
+
+    def _heartbeat_left(self) -> float:
+        elapsed = time.monotonic() - self._last_heartbeat_ok
+        return self.heartbeat_ttl.total_seconds() - elapsed
+
+    async def _step(self, name: str, run: Callable[[], Awaitable[object]]) -> bool:
+        """Run one loop step within the heartbeat deadline. False after a database error."""
+
+        try:
+            async with asyncio.timeout(max(self._heartbeat_left(), 0.0)):
+                await run()
+        except _DB_ERRORS as exc:
+            logger.warning("worker %s %s failed, retrying: %s", self.id, name, public_db_error(exc))
+            return False
+        return True
+
+    async def _rescue(self) -> None:
+        await rescue(self.app.engine, self.app.hooks, ttl=self.heartbeat_ttl)
+
+    async def _prune(self) -> None:
+        await prune(self.app.engine, retention=self.app.retention)
+
+    async def _schedule(self) -> None:
+        await schedule_due(self.app)
+
     def _error_delay(self, failures: int) -> float:
         """Back off after consecutive database errors, up to the heartbeat interval."""
 
         ceiling = max(self.heartbeat_interval.total_seconds(), _ERROR_DELAY_FLOOR)
-        seconds = min(_ERROR_DELAY_FLOOR * 2 ** (failures - 1), ceiling)
+        doublings = min(failures - 1, _ERROR_DELAY_MAX_DOUBLINGS)
+        seconds = min(_ERROR_DELAY_FLOOR * 2**doublings, ceiling)
         return poll_delay(seconds, random.random())
 
     async def _wait(self, stop: asyncio.Event, delay: float) -> None:
@@ -337,13 +354,14 @@ class Worker:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         try:
-            async with self.app.engine.begin() as connection:
-                await _release(connection, self.app.hooks, self.id)
-                await connection.execute(
-                    text("DELETE FROM akadze.workers WHERE id = :id"),
-                    {"id": self.id},
-                )
-        except (SQLAlchemyError, OSError) as exc:
+            async with asyncio.timeout(self.heartbeat_ttl.total_seconds()):
+                async with self.app.engine.begin() as connection:
+                    await _release(connection, self.app.hooks, self.id)
+                    await connection.execute(
+                        text("DELETE FROM akadze.workers WHERE id = :id"),
+                        {"id": self.id},
+                    )
+        except _DB_ERRORS as exc:
             logger.warning(
                 "worker %s could not release its jobs; another worker will rescue them: %s",
                 self.id,
@@ -355,8 +373,9 @@ class Worker:
         deadline = time.monotonic() + self.shutdown_timeout.total_seconds()
         while self._inflight and time.monotonic() < deadline:
             try:
-                await self.heartbeat()
-            except (SQLAlchemyError, OSError):
+                async with asyncio.timeout(max(self._heartbeat_left(), 0.0)):
+                    await self.heartbeat()
+            except _DB_ERRORS:
                 logger.info("worker %s heartbeat failed during shutdown", self.id)
                 return
             remaining = deadline - time.monotonic()
@@ -387,19 +406,56 @@ class Worker:
                 if _run.done:
                     logger.info("job %s raised after complete_tx", job.id)
                     return
-                await _finish(self.app.engine, self.app.hooks, job, exc, None, policy)
+                await self._record(job, exc, None, policy)
             else:
                 if _run.done:
                     return
-                await _finish(self.app.engine, self.app.hooks, job, None, result, policy)
+                await self._record(job, None, result, policy)
         finally:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
 
+    async def _record(
+        self,
+        job: Job,
+        exc: BaseException | None,
+        result: object,
+        policy: BackoffPolicy | None,
+    ) -> None:
+        """Write the outcome, retrying database errors while this worker is alive.
+
+        The job stays in flight meanwhile, so the claim loop does not run it
+        again. Once the heartbeat is stale the outcome is dropped and the job is
+        left for rescue.
+        """
+
+        failures = 0
+        while True:
+            try:
+                await _finish(self.app.engine, self.app.hooks, job, exc, result, policy)
+                return
+            except _DB_ERRORS as error:
+                failures += 1
+                if self._stale():
+                    logger.warning(
+                        "job %s outcome not recorded; leaving it for rescue: %s",
+                        job.id,
+                        public_db_error(error),
+                    )
+                    return
+                logger.warning(
+                    "job %s outcome not recorded, retrying: %s", job.id, public_db_error(error)
+                )
+                await asyncio.sleep(self._error_delay(failures))
+
     async def _invoke(self, job: Job) -> object:
-        async with self.app.engine.connect() as connection:
-            fresh = await job_by_id(connection, job.id)
+        try:
+            async with self.app.engine.connect() as connection:
+                fresh = await job_by_id(connection, job.id)
+        except _DB_ERRORS as exc:
+            logger.warning("job %s not started, will retry: %s", job.id, public_db_error(exc))
+            raise _Lost from None
         if (
             fresh is None
             or fresh.state != "running"
