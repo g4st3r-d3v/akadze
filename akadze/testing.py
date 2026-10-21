@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic_core import to_jsonable_python
 from sqlalchemy import text
 
 from akadze.app import Akadze
@@ -42,7 +43,11 @@ async def drain(app: Akadze, *, limit: int = _DRAIN_LIMIT) -> None:
 
 
 async def assert_enqueued(app: Akadze, task: str, **arguments: Any) -> None:
-    """Raise AssertionError unless a queued or running job has this task and these arguments."""
+    """Raise AssertionError unless a queued or running job has this task and these arguments.
+
+    Arguments are compared in their stored JSON form, so models, ``UUID`` and
+    ``datetime`` can be passed as the task receives them.
+    """
 
     async with app.engine.connect() as connection:
         rows = await connection.execute(
@@ -55,8 +60,9 @@ async def assert_enqueued(app: Akadze, task: str, **arguments: Any) -> None:
             ),
             {"task": task},
         )
+        expected = to_jsonable_python(arguments)
         for row in rows:
-            if _contains(_decode(row[0]), arguments):
+            if _contains(_decode(row[0]), expected):
                 return
     raise AssertionError(f"{task} is not enqueued")
 
