@@ -402,6 +402,7 @@ async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> 
 
 
 _HEAD_FACTOR = 4
+_STALE_CLAIM_TRIES = 3
 
 
 async def _claim_queue(
@@ -420,12 +421,39 @@ async def _claim_queue(
     does one whose head held every ready row. Otherwise (limits block the head,
     other claimers hold its rows) the head claim is rolled back to its
     savepoint, releasing its locks, and a full scan claims instead. Fair turns
-    are not a prefix of the head, so fair claims always scan. Transition hooks
-    run once the claim is final.
+    are not a prefix of the head, so fair claims always scan. A claim that
+    leaves a limit key past its limit read a stale snapshot; it is rolled back
+    and tried again, and after a few tries this call claims nothing. Transition
+    hooks run once the claim is final.
     """
 
     if limit <= 0:
         return 0
+    jobs: list[Job] = []
+    for _ in range(_STALE_CLAIM_TRIES):
+        savepoint = await connection.begin_nested()
+        jobs = await _claim_once(
+            connection, worker_id=worker_id, queue=queue, limit=limit, fair=fair
+        )
+        if not await _over_limit(connection, jobs):
+            await savepoint.commit()
+            break
+        await savepoint.rollback()
+        jobs = []
+    for job in jobs:
+        await hooks.ran_transition(connection, job, "queued", "running")
+        logger.info("job %s queued -> running", job.id)
+    return len(jobs)
+
+
+async def _claim_once(
+    connection: AsyncConnection,
+    *,
+    worker_id: UUID,
+    queue: str,
+    limit: int,
+    fair: bool,
+) -> list[Job]:
     jobs: list[Job] = []
     if not fair:
         savepoint = await connection.begin_nested()
@@ -439,10 +467,54 @@ async def _claim_queue(
             jobs = []
     if not jobs:
         jobs, _ = await _claim(connection, worker_id=worker_id, queue=queue, limit=limit, fair=fair)
-    for job in jobs:
-        await hooks.ran_transition(connection, job, "queued", "running")
-        logger.info("job %s queued -> running", job.id)
-    return len(jobs)
+    return jobs
+
+
+async def _over_limit(connection: AsyncConnection, jobs: list[Job]) -> bool:
+    """Whether a claimed key now runs or starts past its limit.
+
+    The claim counts running jobs and start marks in the snapshot its statement
+    began with. When it waited for another claimer's lock on a limits row, that
+    snapshot misses what the other claim committed. This check runs in a new
+    statement, after the locks are held, so it sees every committed claim.
+    """
+
+    keys = sorted({job.limit_key for job in jobs if job.limit_key is not None})
+    if not keys:
+        return False
+    over = await connection.scalar(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM akadze.limits AS l
+                WHERE l.key = ANY(CAST(:keys AS text[]))
+                  AND (
+                        (
+                            l.max_running IS NOT NULL
+                            AND (
+                                SELECT count(*)
+                                FROM akadze.jobs AS jobs
+                                WHERE jobs.state = 'running'
+                                  AND jobs.limit_key = l.key
+                            ) > l.max_running
+                        )
+                        OR (
+                            l.max_starts IS NOT NULL
+                            AND (
+                                SELECT count(*)
+                                FROM akadze.limit_starts AS marks
+                                WHERE marks.key = l.key
+                                  AND marks.started_at > now() - l."window"
+                            ) > l.max_starts
+                        )
+                  )
+            )
+            """
+        ),
+        {"keys": keys},
+    )
+    return bool(over)
 
 
 async def _claim(
