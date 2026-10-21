@@ -7,7 +7,7 @@ import pytest
 from akadze import Akadze
 from akadze.maintenance import prune, rescue
 from akadze.worker import Worker
-from tests.factories import age_worker_heartbeat, insert_job, insert_periodic_run
+from tests.factories import age_worker_heartbeat, apply_limit, insert_job, insert_periodic_run
 from tests.pg import connection, job_row, job_rows
 
 
@@ -143,3 +143,29 @@ async def test_pruner_deletes_old_finished_jobs_in_batches(app: Akadze, database
     async with connection(database_url) as opened:
         names = await opened.fetch("SELECT name FROM akadze.periodic_runs ORDER BY name")
     assert [row["name"] for row in names] == ["fresh"]
+
+
+async def test_pruner_deletes_start_marks_outside_the_window(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    await apply_limit(
+        app.engine, key="idle", max_running=None, max_starts=1, window=timedelta(minutes=1)
+    )
+    async with connection(database_url) as opened:
+        await opened.execute(
+            """
+            INSERT INTO akadze.limit_starts (key, started_at)
+            VALUES ('idle', now() - interval '2 minutes'), ('idle', now())
+            """
+        )
+
+    # Act
+    await prune(app.engine, retention=timedelta(days=7))
+
+    # Assert
+    async with connection(database_url) as opened:
+        fresh = await opened.fetch(
+            "SELECT started_at > now() - interval '1 minute' AS fresh FROM akadze.limit_starts"
+        )
+    assert [row["fresh"] for row in fresh] == [True]

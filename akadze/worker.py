@@ -192,12 +192,17 @@ class Worker:
         self._last_heartbeat_ok = time.monotonic()
 
     async def claim_available(self) -> None:
-        """Claim up to the free slots. The transaction closes before a task runs."""
+        """Claim up to the free slots, one transaction per queue.
+
+        Each transaction closes before a task runs. A transaction per queue keeps
+        the limits locks of one queue from being held while another queue's claim
+        waits for its own, so workers with different queue orders cannot deadlock.
+        """
 
         full = False
         self._last_claim_full = False
-        async with self.app.engine.begin() as connection:
-            for queue in self.queues:
+        for queue in self.queues:
+            async with self.app.engine.begin() as connection:
                 await _cancel_due(connection, self.app.hooks, queue)
                 busy = await count_running(connection, self.id, queue)
                 limit = self.slots - busy
@@ -420,17 +425,20 @@ async def _claim_queue(
     does one whose head held every ready row. Otherwise (limits block the head,
     other claimers hold its rows) the head claim is rolled back to its
     savepoint, releasing its locks, and a full scan claims instead. Fair turns
-    are not a prefix of the head, so fair claims always scan. Transition hooks
-    run once the claim is final.
+    are not a prefix of the head, so fair claims always scan. Each claim first
+    locks the limits rows of its candidates (see ``_lock_limits``). Transition
+    hooks run once the claim is final.
     """
 
     if limit <= 0:
         return 0
     jobs: list[Job] = []
     if not fair:
+        head = limit * _HEAD_FACTOR
         savepoint = await connection.begin_nested()
+        locked = await _lock_limits(connection, queue=queue, head=head)
         jobs, ready_rows = await _claim(
-            connection, worker_id=worker_id, queue=queue, limit=limit, head=limit * _HEAD_FACTOR
+            connection, worker_id=worker_id, queue=queue, limit=limit, locked=locked, head=head
         )
         if len(jobs) == limit or 0 < ready_rows < limit * _HEAD_FACTOR:
             await savepoint.commit()
@@ -438,11 +446,69 @@ async def _claim_queue(
             await savepoint.rollback()
             jobs = []
     if not jobs:
-        jobs, _ = await _claim(connection, worker_id=worker_id, queue=queue, limit=limit, fair=fair)
+        locked = await _lock_limits(connection, queue=queue, head=None)
+        jobs, _ = await _claim(
+            connection, worker_id=worker_id, queue=queue, limit=limit, locked=locked, fair=fair
+        )
     for job in jobs:
         await hooks.ran_transition(connection, job, "queued", "running")
         logger.info("job %s queued -> running", job.id)
     return len(jobs)
+
+
+def _ready_sql(head: int | None) -> str:
+    """Ready rows of :queue, or only the top :head of them."""
+
+    head_sql = (
+        """
+        ORDER BY j.priority DESC, j.run_at, j.id
+        LIMIT :head"""
+        if head is not None
+        else ""
+    )
+    return f"""
+        SELECT j.id, j.limit_key, j.priority, j.run_at
+        FROM akadze.jobs AS j
+        WHERE j.state = 'queued'
+          AND j.queue = :queue
+          AND j.run_at <= now()
+          AND j.cancel_requested_at IS NULL
+          AND (j.expires_at IS NULL OR j.expires_at > now())
+          AND NOT EXISTS (
+              SELECT 1
+              FROM akadze.queue_pauses
+              WHERE queue_pauses.queue = :queue
+          ){head_sql}"""
+
+
+async def _lock_limits(connection: AsyncConnection, *, queue: str, head: int | None) -> list[str]:
+    """Lock the limits rows of the ready rows' keys and return those keys.
+
+    This is its own statement because under READ COMMITTED a statement reads
+    one snapshot, taken before it waits for a lock. The claim that follows
+    starts after these locks are held, so it counts running jobs and start
+    marks that other claimers of the same keys have committed.
+    """
+
+    rows = await connection.execute(
+        text(
+            f"""
+            WITH ready AS ({_ready_sql(head)}
+            )
+            SELECT l.key
+            FROM akadze.limits AS l
+            WHERE l.key IN (
+                SELECT DISTINCT ready.limit_key
+                FROM ready
+                WHERE ready.limit_key IS NOT NULL
+            )
+            ORDER BY l.key
+            FOR UPDATE
+            """
+        ),
+        {"queue": queue, "head": head},
+    )
+    return [str(row[0]) for row in rows]
 
 
 async def _claim(
@@ -451,6 +517,7 @@ async def _claim(
     worker_id: UUID,
     queue: str,
     limit: int,
+    locked: list[str],
     fair: bool = False,
     head: int | None = None,
 ) -> tuple[list[Job], int]:
@@ -462,19 +529,14 @@ async def _claim(
     then the next: a job's turn is its group's running count plus its place
     in the group. One key with a deep backlog cannot hold every slot, across
     claims and across workers. With ``head``, only the top ``head`` ready rows
-    are candidates.
+    are candidates. ``locked`` are the limit keys whose rows this transaction
+    already holds; a candidate whose key has a limits row outside it waits for
+    the next claim, so every limit is counted in a snapshot taken after its lock.
 
     Returns the claimed jobs and how many ready rows were candidates (0 when
     nothing was claimed). Transition hooks are the caller's.
     """
 
-    head_sql = (
-        """
-                ORDER BY j.priority DESC, j.run_at, j.id
-                LIMIT :head"""
-        if head is not None
-        else ""
-    )
     if fair:
         fair_rn = """,
                     row_number() OVER (
@@ -505,30 +567,12 @@ async def _claim(
     result = await connection.execute(
         text(
             f"""
-            WITH ready AS (
-                SELECT j.id, j.limit_key, j.priority, j.run_at
-                FROM akadze.jobs AS j
-                WHERE j.state = 'queued'
-                  AND j.queue = :queue
-                  AND j.run_at <= now()
-                  AND j.cancel_requested_at IS NULL
-                  AND (j.expires_at IS NULL OR j.expires_at > now())
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM akadze.queue_pauses
-                      WHERE queue_pauses.queue = :queue
-                  ){head_sql}
+            WITH ready AS ({_ready_sql(head)}
             ),
             locked_limits AS (
                 SELECT l.key, l.max_running, l.max_starts, l."window" AS rate_window
                 FROM akadze.limits AS l
-                WHERE l.key IN (
-                    SELECT DISTINCT ready.limit_key
-                    FROM ready
-                    WHERE ready.limit_key IS NOT NULL
-                )
-                ORDER BY l.key
-                FOR UPDATE
+                WHERE l.key = ANY(CAST(:locked AS text[]))
             ),
             running AS (
                 SELECT jobs.limit_key, count(*)::int AS running_count
@@ -566,9 +610,18 @@ async def _claim(
                     ON running.limit_key = ready.limit_key
                 LEFT JOIN starts
                     ON starts.limit_key = ready.limit_key
-                WHERE locked_limits.key IS NULL
+                WHERE ready.limit_key IS NULL
                    OR (
-                        (
+                        locked_limits.key IS NULL
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM akadze.limits AS policy
+                            WHERE policy.key = ready.limit_key
+                        )
+                   )
+                   OR (
+                        locked_limits.key IS NOT NULL
+                        AND (
                             locked_limits.max_running IS NULL
                             OR coalesce(running.running_count, 0)
                                < locked_limits.max_running
@@ -650,18 +703,31 @@ async def _claim(
                   AND locked_limits.max_starts IS NOT NULL
                 RETURNING key
             ),
+            expired_marks AS (
+                SELECT marks.id
+                FROM akadze.limit_starts AS marks
+                INNER JOIN locked_limits
+                    ON locked_limits.key = marks.key
+                WHERE locked_limits.rate_window IS NOT NULL
+                  AND marks.started_at < now() - locked_limits.rate_window
+                FOR UPDATE OF marks SKIP LOCKED
+            ),
             pruned AS (
                 DELETE FROM akadze.limit_starts AS marks
-                USING akadze.limits AS limits
-                WHERE marks.key = limits.key
-                  AND limits."window" IS NOT NULL
-                  AND marks.started_at < now() - limits."window"
+                USING expired_marks
+                WHERE marks.id = expired_marks.id
                 RETURNING marks.id
             )
             SELECT claimed.*, (SELECT count(*) FROM ready) AS ready_rows FROM claimed
             """
         ),
-        {"queue": queue, "limit": limit, "head": head, "worker_id": worker_id},
+        {
+            "queue": queue,
+            "limit": limit,
+            "head": head,
+            "worker_id": worker_id,
+            "locked": locked,
+        },
     )
     rows = result.mappings().all()
     ready_rows = int(rows[0]["ready_rows"]) if rows else 0
