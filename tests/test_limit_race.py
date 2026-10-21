@@ -20,14 +20,16 @@ _POLICIES = {
 }
 
 
-async def _wait_for_lock_waiter(database_url: str) -> None:
+async def _wait_for_limits_lock_waiter(database_url: str) -> None:
     async with connection(database_url) as opened:
         for _ in range(500):
             waiting = await opened.fetchval(
                 """
                 SELECT count(*)
                 FROM pg_stat_activity
-                WHERE datname = current_database() AND wait_event_type = 'Lock'
+                WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND query LIKE '%FROM akadze.limits AS l%FOR UPDATE%'
                 """
             )
             if waiting:
@@ -65,18 +67,27 @@ async def test_claim_waiting_on_a_limit_lock_sees_the_committed_claim(
     await first.register()
     await second.register()
     first_claim = asyncio.create_task(first.claim_available())
-    await held.wait()
-    async with app.engine.begin() as session:
-        await job.using(session=session, limit_key="vendor", priority=10).enqueue()
-    second_claim = asyncio.create_task(second.claim_available())
-    await _wait_for_lock_waiter(database_url)
+    second_claim: asyncio.Task[None] | None = None
+    try:
+        await held.wait()
+        async with app.engine.begin() as session:
+            await job.using(session=session, limit_key="vendor", priority=10).enqueue()
+        second_claim = asyncio.create_task(second.claim_available())
+        await _wait_for_limits_lock_waiter(database_url)
 
-    # Act
-    release.set()
-    await asyncio.gather(first_claim, second_claim)
+        # Act
+        release.set()
+        await asyncio.gather(first_claim, second_claim)
+    finally:
+        release.set()
+        await asyncio.gather(
+            first_claim, *([second_claim] if second_claim else []), return_exceptions=True
+        )
 
     # Assert
-    running = [row for row in await job_rows(database_url) if row["state"] == "running"]
-    assert len(running) == 1
-    await first.shutdown()
-    await second.shutdown()
+    try:
+        running = [row for row in await job_rows(database_url) if row["state"] == "running"]
+        assert len(running) == 1
+    finally:
+        await first.shutdown()
+        await second.shutdown()

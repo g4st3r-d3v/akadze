@@ -82,7 +82,11 @@ async def rescue(engine: AsyncEngine, hooks: Hooks, *, ttl: timedelta) -> None:
 
 
 async def prune(engine: AsyncEngine, *, retention: timedelta, batch: int = 1000) -> None:
-    """Delete finished jobs and old periodic runs. Returns nothing."""
+    """Delete finished jobs, old periodic runs, and start marks outside their window.
+
+    Returns nothing. A claim prunes the marks of the keys it locks; this sweep
+    covers keys that no claim touches any more.
+    """
 
     async with engine.begin() as connection:
         await connection.execute(
@@ -111,4 +115,15 @@ async def prune(engine: AsyncEngine, *, retention: timedelta, batch: int = 1000)
                 """
             ),
             {"retention": retention},
+        )
+        await connection.execute(
+            text(
+                """
+                DELETE FROM akadze.limit_starts AS marks
+                USING akadze.limits AS limits
+                WHERE marks.key = limits.key
+                  AND limits."window" IS NOT NULL
+                  AND marks.started_at < now() - limits."window"
+                """
+            )
         )
