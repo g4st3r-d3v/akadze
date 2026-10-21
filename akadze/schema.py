@@ -10,12 +10,13 @@ from urllib.parse import urlparse
 
 import asyncpg  # type: ignore[import-untyped]
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, InterfaceError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 _MIGRATIONS = Path(__file__).resolve().parent / "sql"
-_PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
+PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
 _ERROR_MESSAGE_LIMIT = 200
 _LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('akadze.migrate'))"
 _BOOTSTRAP_SQL = (
@@ -49,7 +50,7 @@ def redact_database_url(message: str, database_url: str) -> str:
         redacted = redacted.replace(async_database_url(database_url), "postgresql://***")
     except ValueError:
         pass
-    redacted = _PASSWORD_IN_URL.sub("://***@", redacted)
+    redacted = PASSWORD_IN_URL.sub("://***@", redacted)
     password = urlparse(database_url).password
     if password is not None and len(password) >= 4:
         redacted = redacted.replace(password, "***")
@@ -70,9 +71,11 @@ ones raised while opening a connection (for example "the database system is
 starting up").
 """
 
-# Connection failure, shutdown or restart, too many connections, serialization
-# failure, deadlock: running the same statement again can succeed.
-_TRANSIENT_SQLSTATES = ("08", "57P", "53300", "40001", "40P01")
+# Connection failure, shutdown or restart, too many connections, statement or
+# lock timeout, serialization failure, deadlock: running the same statement
+# again can succeed.
+_TRANSIENT_SQLSTATES = ("08", "57P", "53300", "57014", "55P03", "40001", "40P01")
+_CLOSED_CONNECTION = ("connection is closed", "connection was closed")
 
 
 def is_transient_db_error(exc: BaseException) -> bool:
@@ -81,9 +84,11 @@ def is_transient_db_error(exc: BaseException) -> bool:
     if isinstance(exc, DBAPIError) and exc.connection_invalidated:
         return True
     for error in _error_chain(exc):
-        if isinstance(error, OSError | asyncpg.InterfaceError | InterfaceError):
+        if isinstance(error, OSError | PoolTimeout | asyncpg.exceptions.InternalClientError):
             return True
-        if isinstance(error, asyncpg.exceptions.InternalClientError):
+        if isinstance(error, asyncpg.InterfaceError) and any(
+            text in str(error) for text in _CLOSED_CONNECTION
+        ):
             return True
         sqlstate = getattr(error, "sqlstate", None)
         if isinstance(sqlstate, str) and sqlstate.startswith(_TRANSIENT_SQLSTATES):
@@ -113,7 +118,7 @@ def public_db_error(exc: BaseException) -> str:
     cause = exc.orig if isinstance(exc, DBAPIError) and exc.orig is not None else exc
     detail = str(cause).strip()
     first = detail.splitlines()[0] if detail else ""
-    first = _PASSWORD_IN_URL.sub("://***@", first)[:_ERROR_MESSAGE_LIMIT]
+    first = PASSWORD_IN_URL.sub("://***@", first)[:_ERROR_MESSAGE_LIMIT]
     return f"{name}: {first}" if first else name
 
 

@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse
 import asyncpg
 import pytest
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from akadze import Akadze
@@ -103,10 +104,24 @@ async def test_a_persistent_database_error_stops_the_worker(app: Akadze, databas
         (ConnectionRefusedError(111, "refused"), True),
         (asyncpg.exceptions.CannotConnectNowError("the database system is starting up"), True),
         (asyncpg.exceptions.DeadlockDetectedError("deadlock detected"), True),
+        (asyncpg.exceptions.QueryCanceledError("canceling statement due to timeout"), True),
+        (PoolTimeout("QueuePool limit of size 5 overflow 10 reached"), True),
+        (asyncpg.InterfaceError("connection is closed"), True),
+        (asyncpg.InterfaceError("the server expects 2 arguments, 1 was passed"), False),
         (asyncpg.exceptions.UndefinedTableError("relation does not exist"), False),
         (asyncpg.exceptions.UntranslatableCharacterError("unsupported Unicode escape"), False),
     ],
-    ids=["refused", "starting-up", "deadlock", "undefined-table", "untranslatable"],
+    ids=[
+        "refused",
+        "starting-up",
+        "deadlock",
+        "statement-timeout",
+        "pool-timeout",
+        "closed",
+        "misuse",
+        "undefined-table",
+        "untranslatable",
+    ],
 )
 def test_transient_database_errors_are_told_apart(error: BaseException, transient: bool) -> None:
     # Act
@@ -116,12 +131,16 @@ def test_transient_database_errors_are_told_apart(error: BaseException, transien
     assert result is transient
 
 
-async def test_an_outcome_that_cannot_be_stored_is_recorded_as_a_failed_run(
+async def test_an_outcome_that_cannot_be_stored_fails_the_job_without_running_it_again(
     app: Akadze, database_url: str
 ) -> None:
     # Arrange
-    @app.task("nul", max_attempts=1)
+    calls = 0
+
+    @app.task("nul", max_attempts=3)
     async def nul() -> str:
+        nonlocal calls
+        calls += 1
         return "a\x00b"
 
     async with app.engine.begin() as session:
@@ -134,6 +153,7 @@ async def test_an_outcome_that_cannot_be_stored_is_recorded_as_a_failed_run(
     row = await job_row(database_url, "nul")
     assert row is not None
     assert row["state"] == "failed"
+    assert calls == 1
     errors = as_json(row["errors"])
     assert errors[0]["message"] == "outcome could not be stored: DBAPIError (SQLSTATE 22P05)"
 

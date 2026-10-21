@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from akadze.args import load_arguments
 from akadze.context import bind_run, reset_run
-from akadze.exc import AkadzeError, Cancel
+from akadze.exc import AkadzeError, Cancel, Fail
 from akadze.hooks import Hooks
 from akadze.job import (
     _COLUMNS,
@@ -111,6 +111,7 @@ def poll_delay(seconds: float, unit: float) -> float:
 _ERROR_DELAY_FLOOR = 0.1
 _ERROR_DELAY_MAX_DOUBLINGS = 16
 _STALE_CHECK_SECONDS = 1.0
+_STALE_MARGIN = 0.1
 
 
 class _Lost(Exception):
@@ -147,7 +148,7 @@ class Worker:
         self._last_heartbeat_ok = time.monotonic()
         self._abandon = False
         self._heartbeat_failing = False
-        self._unrecorded: set[int] = set()
+        self._fatal: BaseException | None = None
         self._draining = False
         self._last_claim_full = False
 
@@ -243,7 +244,7 @@ class Worker:
             jobs = await running_jobs(connection, self.id)
         started: list[asyncio.Task[None]] = []
         for job in jobs:
-            if job.id in self._inflight or job.id in self._unrecorded:
+            if job.id in self._inflight:
                 continue
             task = asyncio.create_task(self._execute(job))
             self._inflight[job.id] = task
@@ -263,27 +264,31 @@ class Worker:
         await self.register()
         self._last_heartbeat_ok = time.monotonic()
         loop = asyncio.create_task(self._loop(stop))
-        beat = asyncio.create_task(self._beat(stop, loop))
+        beat = asyncio.create_task(self._beat(stop))
+        grace = self.heartbeat_ttl.total_seconds()
         try:
-            await loop
-        except asyncio.CancelledError:
-            if not self._abandon:
-                raise
+            done, _ = await asyncio.wait({loop, beat}, return_when=asyncio.FIRST_COMPLETED)
+            if beat in done and not self._abandon and beat.exception() is None:
+                await asyncio.wait({loop}, timeout=grace)
+            for task in (loop, beat):
+                if task.done():
+                    task.result()
         finally:
-            beat.cancel()
-            await asyncio.gather(beat, return_exceptions=True)
-            if not loop.done():
-                loop.cancel()
-                await asyncio.wait({loop}, timeout=self.heartbeat_ttl.total_seconds())
+            pending = {task for task in (loop, beat) if not task.done()}
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.wait(pending, timeout=grace)
             await self.shutdown()
 
-    async def _beat(self, stop: asyncio.Event, loop: asyncio.Task[None]) -> None:
+    async def _beat(self, stop: asyncio.Event) -> None:
         failures = 0
         while not stop.is_set():
             if self._stale():
                 logger.info("worker %s heartbeat is stale; stopping", self.id)
                 self._abandon = True
-                loop.cancel()
+                for task in self._inflight.values():
+                    task.cancel()
                 return
             try:
                 async with asyncio.timeout(max(self._heartbeat_left(), 0.0)):
@@ -309,6 +314,8 @@ class Worker:
         next_prune = 0.0
         failures = 0
         while not stop.is_set():
+            if self._fatal is not None:
+                raise self._fatal
             now = time.monotonic()
             ok = True
             if now >= next_rescue:
@@ -348,8 +355,15 @@ class Worker:
         return self._heartbeat_left() <= 0
 
     def _heartbeat_left(self) -> float:
-        elapsed = time.monotonic() - self._last_heartbeat_ok
-        return self.heartbeat_ttl.total_seconds() - elapsed
+        """Seconds until this worker counts itself stale.
+
+        That is a margin before heartbeat_ttl, so its jobs are stopped before
+        other workers, which go by heartbeat_at in the database, rescue them.
+        """
+
+        ttl = self.heartbeat_ttl.total_seconds()
+        margin = min(self.heartbeat_interval.total_seconds(), ttl * _STALE_MARGIN)
+        return ttl - margin - (time.monotonic() - self._last_heartbeat_ok)
 
     async def _step(self, name: str, run: Callable[[], Awaitable[object]]) -> bool:
         """Run one loop step. False after a transient database error; others raise."""
@@ -462,8 +476,8 @@ class Worker:
         A transient database error is retried while the heartbeat is fresh, so
         the claim loop does not run the job again. Once the heartbeat is stale
         the job is left for rescue. Any other error (the outcome cannot be
-        stored) records a failed run instead; if even that fails, the job is
-        kept off the claim loop until this worker stops and releases it.
+        stored) fails the job without another attempt, since the body may have
+        succeeded; if even that fails, the worker stops.
         """
 
         failures = 0
@@ -493,13 +507,13 @@ class Worker:
     async def _record_unstorable(
         self, job: Job, error: BaseException, policy: BackoffPolicy | None
     ) -> None:
-        reason = RuntimeError(f"outcome could not be stored: {public_db_error(error)}")
+        reason = Fail(f"outcome could not be stored: {public_db_error(error)}")
         try:
             await _finish(self.app.engine, self.app.hooks, job, reason, None, policy)
         except DB_ERRORS as again:
-            self._unrecorded.add(job.id)
+            self._fatal = again
             logger.error(
-                "job %s outcome could not be stored; it stays running until this worker stops: %s",
+                "job %s outcome could not be stored; stopping the worker: %s",
                 job.id,
                 public_db_error(again),
             )
@@ -511,7 +525,9 @@ class Worker:
             async with self.app.engine.connect() as connection:
                 fresh = await job_by_id(connection, job.id)
         except DB_ERRORS as exc:
-            logger.warning("job %s not started, will retry: %s", job.id, public_db_error(exc))
+            if not is_transient_db_error(exc):
+                self._fatal = exc
+            logger.warning("job %s not started: %s", job.id, public_db_error(exc))
             raise _Lost from None
         if (
             fresh is None

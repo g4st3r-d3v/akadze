@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import random
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
 from akadze.exc import Cancel, Fail, Retry, Snooze
 from akadze.job import Job
+from akadze.schema import PASSWORD_IN_URL
 
 _MAX_BACKOFF_SECONDS = 300
 _JITTER_FLOOR = 0.5
@@ -21,7 +21,6 @@ logger = logging.getLogger("akadze.outcome")
 
 BackoffPolicy = Callable[[int], timedelta]
 _MESSAGE_LIMIT = 500
-_PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
 
 
 @dataclass(frozen=True)
@@ -141,5 +140,5 @@ def _non_negative(delay: timedelta) -> timedelta:
 
 
 def _message(exc: BaseException) -> str:
-    text = _PASSWORD_IN_URL.sub("://***@", str(exc).strip()).replace("\x00", "")
+    text = PASSWORD_IN_URL.sub("://***@", str(exc).strip()).replace("\x00", "")
     return text[:_MESSAGE_LIMIT]
