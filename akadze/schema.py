@@ -8,12 +8,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+import asyncpg  # type: ignore[import-untyped]
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 _MIGRATIONS = Path(__file__).resolve().parent / "sql"
+PASSWORD_IN_URL = re.compile(r"://[^\s/@]+:[^\s/@]+@")
+_ERROR_MESSAGE_LIMIT = 200
 _LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('akadze.migrate'))"
 _BOOTSTRAP_SQL = (
     "CREATE SCHEMA IF NOT EXISTS akadze",
@@ -46,11 +50,86 @@ def redact_database_url(message: str, database_url: str) -> str:
         redacted = redacted.replace(async_database_url(database_url), "postgresql://***")
     except ValueError:
         pass
-    redacted = re.sub(r"://[^\s/@]+:[^\s/@]+@", "://***@", redacted)
+    redacted = PASSWORD_IN_URL.sub("://***@", redacted)
     password = urlparse(database_url).password
     if password is not None and len(password) >= 4:
         redacted = redacted.replace(password, "***")
     return redacted
+
+
+DB_ERRORS: tuple[type[BaseException], ...] = (
+    SQLAlchemyError,
+    OSError,
+    asyncpg.PostgresError,
+    asyncpg.InterfaceError,
+    asyncpg.exceptions.InternalClientError,
+)
+"""Errors that come from the database or the connection to it.
+
+Raw asyncpg errors are listed because SQLAlchemy 2.0 does not translate the
+ones raised while opening a connection (for example "the database system is
+starting up").
+"""
+
+# Connection failure, shutdown or restart, too many connections, statement or
+# lock timeout, serialization failure, deadlock: running the same statement
+# again can succeed.
+_TRANSIENT_SQLSTATES = ("08", "57P", "53300", "57014", "55P03", "40001", "40P01")
+_CLOSED_CONNECTION = ("connection is closed", "connection was closed")
+
+
+def is_transient_db_error(exc: BaseException) -> bool:
+    """Whether a database error can go away when the statement is run again."""
+
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    for error in _error_chain(exc):
+        if isinstance(error, OSError | PoolTimeout | asyncpg.exceptions.InternalClientError):
+            return True
+        if isinstance(error, asyncpg.InterfaceError) and any(
+            text in str(error) for text in _CLOSED_CONNECTION
+        ):
+            return True
+        sqlstate = getattr(error, "sqlstate", None)
+        if isinstance(sqlstate, str) and sqlstate.startswith(_TRANSIENT_SQLSTATES):
+            return True
+    return False
+
+
+def public_db_error(exc: BaseException) -> str:
+    """Describe a database error for a log line: no SQL, no parameters, no password.
+
+    Transient errors keep the first line of the driver message, which says what
+    happened to the connection. Other errors keep only their name and SQLSTATE,
+    because driver messages can quote the values that were sent.
+    """
+
+    name = type(exc).__name__
+    if not is_transient_db_error(exc):
+        sqlstate = next(
+            (
+                code
+                for code in (getattr(error, "sqlstate", None) for error in _error_chain(exc))
+                if isinstance(code, str)
+            ),
+            None,
+        )
+        return f"{name} (SQLSTATE {sqlstate})" if sqlstate else name
+    cause = exc.orig if isinstance(exc, DBAPIError) and exc.orig is not None else exc
+    detail = str(cause).strip()
+    first = detail.splitlines()[0] if detail else ""
+    first = PASSWORD_IN_URL.sub("://***@", first)[:_ERROR_MESSAGE_LIMIT]
+    return f"{name}: {first}" if first else name
+
+
+def _error_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain and len(chain) < 5:
+        chain.append(current)
+        orig = current.orig if isinstance(current, DBAPIError) else None
+        current = orig if orig is not None else current.__cause__
+    return chain
 
 
 def _engine(database_url: str) -> AsyncEngine:
