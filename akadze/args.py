@@ -8,7 +8,7 @@ from typing import Any, cast, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
-from akadze.exc import EnqueueError
+from akadze.exc import EnqueueError, Fail
 
 
 def argument_model(fn: Callable[..., Any]) -> type[BaseModel]:
@@ -48,11 +48,16 @@ def dump_arguments(
 
 
 def load_arguments(model: type[BaseModel], payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate stored arguments and return them as the task's parameter types.
+
+    Field values are taken from the validated model, so a parameter typed as a
+    model, a dataclass, ``datetime`` or ``UUID`` receives that type, not its
+    JSON form. Arguments that do not validate raise ``Fail``: running the job
+    again would not change them.
+    """
+
     try:
         parsed = model.model_validate(payload)
     except ValidationError:
-        raise RuntimeError("invalid arguments") from None
-    dumped = parsed.model_dump()
-    if not isinstance(dumped, dict):
-        raise RuntimeError("invalid arguments")
-    return dumped
+        raise Fail("invalid arguments") from None
+    return {name: getattr(parsed, name) for name in type(parsed).model_fields}
