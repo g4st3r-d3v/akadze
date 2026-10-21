@@ -1,0 +1,147 @@
+"""The worker rides out database errors and stops only on a stale heartbeat."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from datetime import timedelta
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+
+import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from akadze import Akadze
+from akadze.cli import main
+from akadze.worker import Worker
+from tests.pg import connection, job_row
+
+_UNREACHABLE = "postgresql+asyncpg://akadze:secret-pw@127.0.0.1:1/akadze"
+
+
+async def _until(predicate_sql: str, database_url: str, seconds: float = 5) -> None:
+    async with connection(database_url) as opened:
+        for _ in range(int(seconds / 0.02)):
+            if await opened.fetchval(predicate_sql):
+                return
+            await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out waiting for: {predicate_sql}")
+
+
+async def test_worker_keeps_serving_after_its_connections_are_killed(
+    app: Akadze, database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> str:
+        return "done"
+
+    worker = Worker(
+        app,
+        heartbeat_interval=timedelta(milliseconds=50),
+        heartbeat_ttl=timedelta(seconds=30),
+        poll_interval=timedelta(milliseconds=10),
+    )
+    stop = asyncio.Event()
+    serve_task = asyncio.create_task(worker.serve(stop))
+    caplog.set_level(logging.WARNING, logger="akadze")
+    try:
+        await _until("SELECT count(*) FROM akadze.workers", database_url)
+
+        # Act
+        async with connection(database_url) as opened:
+            await opened.execute(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = current_database() AND pid <> pg_backend_pid()
+                """
+            )
+            await opened.execute("INSERT INTO akadze.jobs (task) VALUES ('demo')")
+        await _until(
+            "SELECT count(*) FROM akadze.jobs WHERE task = 'demo' AND state = 'succeeded'",
+            database_url,
+        )
+
+        # Assert
+        assert not serve_task.done()
+        assert "database error, retrying" in caplog.text
+    finally:
+        stop.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+
+
+async def test_worker_stops_when_the_database_is_gone_longer_than_the_ttl(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @app.task("block")
+    async def block() -> None:
+        started.set()
+        await release.wait()
+
+    async with app.engine.begin() as session:
+        await block.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        heartbeat_interval=timedelta(milliseconds=50),
+        heartbeat_ttl=timedelta(milliseconds=500),
+        poll_interval=timedelta(milliseconds=10),
+    )
+    serve_task = asyncio.create_task(worker.serve(asyncio.Event()))
+    reachable = app.engine
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        app.engine = create_async_engine(_UNREACHABLE)
+
+        # Act
+        await asyncio.wait_for(serve_task, timeout=5)
+    finally:
+        release.set()
+        if not serve_task.done():
+            serve_task.cancel()
+            await asyncio.gather(serve_task, return_exceptions=True)
+        await app.engine.dispose()
+        app.engine = reachable
+
+    # Assert
+    assert worker._abandon is True
+    row = await job_row(database_url, "block")
+    assert row is not None
+    assert row["state"] == "running"
+    assert row["worker_id"] == worker.id
+
+
+def test_cli_worker_reports_a_rejected_login_without_the_password(
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Arrange
+    parsed = urlparse(database_url)
+    wrong = parsed._replace(netloc=f"{parsed.username}:secret-pw@{parsed.hostname}:{parsed.port}")
+    (tmp_path / "unreachable_demo.py").write_text(
+        f"from akadze import Akadze\napp = Akadze(database_url={urlunparse(wrong)!r})\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    try:
+        code = main(["worker", "unreachable_demo:app"])
+    finally:
+        sys.modules.pop("unreachable_demo", None)
+        while str(tmp_path) in sys.path:
+            sys.path.remove(str(tmp_path))
+
+    # Assert
+    err = capsys.readouterr().err
+    assert code == 1
+    assert err.startswith("worker failed: ")
+    assert "secret-pw" not in err
+    assert "Traceback" not in err

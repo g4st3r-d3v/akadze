@@ -30,7 +30,7 @@ from akadze.schema import (
     migrate,
     redact_database_url,
 )
-from akadze.worker import Worker, WorkerSummary, list_workers
+from akadze.worker import Worker, WorkerSummary, list_workers, public_db_error
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -472,8 +472,14 @@ def _run_worker(spec: str, *, slots: int, queues: list[str] | None, fair: bool) 
 
     try:
         asyncio.run(_run())
-    except (ValueError, OSError) as exc:
+    except ValueError as exc:
         print(f"worker failed: {exc}", file=sys.stderr)
+        return 1
+    except (SQLAlchemyError, OSError) as exc:
+        print(f"worker failed: {public_db_error(exc)}", file=sys.stderr)
+        return 1
+    if worker._abandon:
+        print("worker stopped: no heartbeat succeeded within heartbeat_ttl", file=sys.stderr)
         return 1
     return 0
 
