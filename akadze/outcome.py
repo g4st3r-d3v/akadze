@@ -141,5 +141,5 @@ def _non_negative(delay: timedelta) -> timedelta:
 
 
 def _message(exc: BaseException) -> str:
-    text = _PASSWORD_IN_URL.sub("://***@", str(exc).strip())
+    text = _PASSWORD_IN_URL.sub("://***@", str(exc).strip()).replace("\x00", "")
     return text[:_MESSAGE_LIMIT]

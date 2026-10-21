@@ -9,13 +9,17 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+import asyncpg
 import pytest
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from akadze import Akadze
 from akadze.cli import main
+from akadze.schema import is_transient_db_error
+from akadze.testing import drain
 from akadze.worker import Worker
-from tests.pg import connection, job_row
+from tests.pg import as_json, connection, job_row
 
 _UNREACHABLE = "postgresql+asyncpg://akadze:secret-pw@127.0.0.1:1/akadze"
 
@@ -29,7 +33,7 @@ async def _until(predicate_sql: str, database_url: str, seconds: float = 5) -> N
     raise AssertionError(f"timed out waiting for: {predicate_sql}")
 
 
-async def test_worker_keeps_serving_after_its_connections_are_killed(
+async def test_worker_keeps_serving_after_the_database_is_gone_for_a_while(
     app: Akadze, database_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Arrange
@@ -46,18 +50,16 @@ async def test_worker_keeps_serving_after_its_connections_are_killed(
     stop = asyncio.Event()
     serve_task = asyncio.create_task(worker.serve(stop))
     caplog.set_level(logging.WARNING, logger="akadze")
+    reachable = app.engine
+    unreachable = create_async_engine(_UNREACHABLE)
     try:
         await _until("SELECT count(*) FROM akadze.workers", database_url)
 
         # Act
+        app.engine = unreachable
+        await asyncio.sleep(0.3)
+        app.engine = reachable
         async with connection(database_url) as opened:
-            await opened.execute(
-                """
-                SELECT pg_terminate_backend(pid)
-                FROM pg_stat_activity
-                WHERE datname = current_database() AND pid <> pg_backend_pid()
-                """
-            )
             await opened.execute("INSERT INTO akadze.jobs (task) VALUES ('demo')")
         await _until(
             "SELECT count(*) FROM akadze.jobs WHERE task = 'demo' AND state = 'succeeded'",
@@ -66,10 +68,74 @@ async def test_worker_keeps_serving_after_its_connections_are_killed(
 
         # Assert
         assert not serve_task.done()
-        assert "failed, retrying" in caplog.text
+        assert "heartbeat failed, retrying" in caplog.text
+        assert "failed, retrying: ConnectionRefusedError" in caplog.text
     finally:
+        app.engine = reachable
         stop.set()
         await asyncio.wait_for(serve_task, timeout=5)
+        await unreachable.dispose()
+
+
+async def test_a_persistent_database_error_stops_the_worker(app: Akadze, database_url: str) -> None:
+    # Arrange
+    async with connection(database_url) as opened:
+        await opened.execute("ALTER TABLE akadze.queue_pauses RENAME TO queue_pauses_gone")
+    worker = Worker(
+        app,
+        heartbeat_interval=timedelta(milliseconds=50),
+        poll_interval=timedelta(milliseconds=10),
+    )
+
+    # Act
+    with pytest.raises(ProgrammingError):
+        await asyncio.wait_for(worker.serve(asyncio.Event()), timeout=5)
+
+    # Assert
+    async with connection(database_url) as opened:
+        workers = await opened.fetchval("SELECT count(*) FROM akadze.workers")
+    assert workers == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        (ConnectionRefusedError(111, "refused"), True),
+        (asyncpg.exceptions.CannotConnectNowError("the database system is starting up"), True),
+        (asyncpg.exceptions.DeadlockDetectedError("deadlock detected"), True),
+        (asyncpg.exceptions.UndefinedTableError("relation does not exist"), False),
+        (asyncpg.exceptions.UntranslatableCharacterError("unsupported Unicode escape"), False),
+    ],
+    ids=["refused", "starting-up", "deadlock", "undefined-table", "untranslatable"],
+)
+def test_transient_database_errors_are_told_apart(error: BaseException, transient: bool) -> None:
+    # Act
+    result = is_transient_db_error(error)
+
+    # Assert
+    assert result is transient
+
+
+async def test_an_outcome_that_cannot_be_stored_is_recorded_as_a_failed_run(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("nul", max_attempts=1)
+    async def nul() -> str:
+        return "a\x00b"
+
+    async with app.engine.begin() as session:
+        await nul.using(session=session).enqueue()
+
+    # Act
+    await drain(app)
+
+    # Assert
+    row = await job_row(database_url, "nul")
+    assert row is not None
+    assert row["state"] == "failed"
+    errors = as_json(row["errors"])
+    assert errors[0]["message"] == "outcome could not be stored: DBAPIError (SQLSTATE 22P05)"
 
 
 async def test_worker_stops_when_the_database_is_gone_longer_than_the_ttl(

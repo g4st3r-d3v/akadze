@@ -24,9 +24,11 @@ from akadze.metrics import render_metrics
 from akadze.queue import JobSummary, list_jobs
 from akadze.queues import pause_queue, resume_queue
 from akadze.schema import (
+    DB_ERRORS,
     MigrateError,
     applied_versions,
     async_database_url,
+    is_transient_db_error,
     migrate,
     public_db_error,
     redact_database_url,
@@ -476,13 +478,27 @@ def _run_worker(spec: str, *, slots: int, queues: list[str] | None, fair: bool) 
     except ValueError as exc:
         print(f"worker failed: {exc}", file=sys.stderr)
         return 1
-    except (SQLAlchemyError, OSError) as exc:
-        print(f"worker failed: {public_db_error(exc)}", file=sys.stderr)
+    except DB_ERRORS as exc:
+        print(f"worker failed: {_worker_error(exc, app)}", file=sys.stderr)
         return 1
     if worker._abandon:
         print("worker stopped: no heartbeat succeeded within heartbeat_ttl", file=sys.stderr)
         return 1
     return 0
+
+
+def _worker_error(exc: BaseException, app: Akadze) -> str:
+    """One line for a database error that stopped the worker, without the password.
+
+    Errors that are not transient (missing schema, rejected login) keep the
+    first line of their message: at start-up it names the cause.
+    """
+
+    if is_transient_db_error(exc):
+        return public_db_error(exc)
+    first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    url = app.engine.url.render_as_string(hide_password=False)
+    return f"{type(exc).__name__}: {redact_database_url(first, url)}"
 
 
 async def _serve(worker: Worker) -> None:

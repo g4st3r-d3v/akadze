@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+import asyncpg  # type: ignore[import-untyped]
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, InterfaceError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -55,28 +56,75 @@ def redact_database_url(message: str, database_url: str) -> str:
     return redacted
 
 
+DB_ERRORS: tuple[type[BaseException], ...] = (
+    SQLAlchemyError,
+    OSError,
+    asyncpg.PostgresError,
+    asyncpg.InterfaceError,
+    asyncpg.exceptions.InternalClientError,
+)
+"""Errors that come from the database or the connection to it.
+
+Raw asyncpg errors are listed because SQLAlchemy 2.0 does not translate the
+ones raised while opening a connection (for example "the database system is
+starting up").
+"""
+
+# Connection failure, shutdown or restart, too many connections, serialization
+# failure, deadlock: running the same statement again can succeed.
+_TRANSIENT_SQLSTATES = ("08", "57P", "53300", "40001", "40P01")
+
+
+def is_transient_db_error(exc: BaseException) -> bool:
+    """Whether a database error can go away when the statement is run again."""
+
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    for error in _error_chain(exc):
+        if isinstance(error, OSError | asyncpg.InterfaceError | InterfaceError):
+            return True
+        if isinstance(error, asyncpg.exceptions.InternalClientError):
+            return True
+        sqlstate = getattr(error, "sqlstate", None)
+        if isinstance(sqlstate, str) and sqlstate.startswith(_TRANSIENT_SQLSTATES):
+            return True
+    return False
+
+
 def public_db_error(exc: BaseException) -> str:
     """Describe a database error for a log line: no SQL, no parameters, no password.
 
-    Connection-level errors keep the first line of the driver message, which
-    says what happened to the connection. Other errors keep only their name and
-    SQLSTATE, because driver messages can quote the values that were sent.
+    Transient errors keep the first line of the driver message, which says what
+    happened to the connection. Other errors keep only their name and SQLSTATE,
+    because driver messages can quote the values that were sent.
     """
 
     name = type(exc).__name__
-    cause = exc.orig if isinstance(exc, DBAPIError) else None
-    if isinstance(exc, InterfaceError | OperationalError) or (
-        isinstance(exc, DBAPIError) and exc.connection_invalidated
-    ):
-        detail = str(cause if cause is not None else exc)
-    elif isinstance(exc, OSError):
-        detail = str(exc)
-    else:
-        sqlstate = getattr(cause, "sqlstate", None)
+    if not is_transient_db_error(exc):
+        sqlstate = next(
+            (
+                code
+                for code in (getattr(error, "sqlstate", None) for error in _error_chain(exc))
+                if isinstance(code, str)
+            ),
+            None,
+        )
         return f"{name} (SQLSTATE {sqlstate})" if sqlstate else name
-    first = detail.strip().splitlines()[0] if detail.strip() else ""
+    cause = exc.orig if isinstance(exc, DBAPIError) and exc.orig is not None else exc
+    detail = str(cause).strip()
+    first = detail.splitlines()[0] if detail else ""
     first = _PASSWORD_IN_URL.sub("://***@", first)[:_ERROR_MESSAGE_LIMIT]
     return f"{name}: {first}" if first else name
+
+
+def _error_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain and len(chain) < 5:
+        chain.append(current)
+        orig = current.orig if isinstance(current, DBAPIError) else None
+        current = orig if orig is not None else current.__cause__
+    return chain
 
 
 def _engine(database_url: str) -> AsyncEngine:
