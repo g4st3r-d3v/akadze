@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -20,6 +21,8 @@ _MAX_POLICY_DELAY = timedelta(days=365)
 logger = logging.getLogger("akadze.outcome")
 
 BackoffPolicy = Callable[[int], timedelta]
+
+
 _MESSAGE_LIMIT = 500
 
 
@@ -39,7 +42,21 @@ def decide(
     exc: BaseException | None,
     result: object,
     policy: BackoffPolicy | None = None,
+    *,
+    honor_cancel: bool = True,
 ) -> Outcome:
+    """Pick the next state of a run that raised ``exc`` or returned ``result``.
+
+    A cancel or the expiry that came while the body ran (``honor_cancel``) does
+    not undo a body that returned a storable result: its side effects happened,
+    so it succeeds. A body that raised, whatever it raised, or returned a
+    result that cannot be stored, is cancelled without spending an attempt.
+    """
+
+    result_json, storable = (None, True) if exc is not None else _dump(result)
+    stopped = honor_cancel and (job.cancel_requested_at is not None or job.expired)
+    if stopped and (exc is not None or not storable):
+        exc = Cancel()
     if isinstance(exc, Cancel):
         return _terminal(job, "cancelled", job.attempt, "Cancel", exc)
     if isinstance(exc, Snooze):
@@ -68,9 +85,7 @@ def decide(
             error_message=_message(exc),
             result_json=None,
         )
-    try:
-        result_json = None if result is None else json.dumps(result)
-    except TypeError:
+    if result is not None and result_json is None:
         attempt = job.attempt + 1
         if attempt >= job.max_attempts:
             return Outcome(
@@ -92,6 +107,30 @@ def decide(
             None,
         )
     return Outcome("succeeded", job.attempt, job.snoozes, None, None, None, result_json)
+
+
+_NUL_ESCAPE = re.compile(r"(?<!\\)(?:\\\\)*\\u0000")
+
+
+def _dump(result: object) -> tuple[str | None, bool]:
+    """Serialize a result: (JSON or None if it does not serialize, whether jsonb takes it).
+
+    jsonb rejects NaN and Infinity and a NUL character in a string, which
+    ``json.dumps`` writes; circular or too deep values do not serialize.
+    """
+
+    if result is None:
+        return None, True
+    try:
+        dumped = json.dumps(result, allow_nan=False)
+    except (TypeError, RecursionError):
+        return None, False
+    except ValueError:
+        try:
+            return json.dumps(result), False
+        except (TypeError, ValueError, RecursionError):
+            return None, False
+    return dumped, not _NUL_ESCAPE.search(dumped)
 
 
 def backoff(

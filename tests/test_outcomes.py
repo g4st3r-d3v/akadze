@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from akadze import Akadze, Cancel, Fail, Retry, Snooze, request_cancel
+from akadze.job import Job
+from akadze.outcome import decide
 from akadze.worker import Worker
 from tests.factories import insert_job
 from tests.pg import as_json, connection, job_row
@@ -94,22 +97,49 @@ async def test_timeout_counts_as_a_failure(app: Akadze, database_url: str) -> No
     assert as_json(row["errors"])[0]["error"] == "TimeoutError"
 
 
-async def test_cancel_during_a_run_discards_the_result(app: Akadze, database_url: str) -> None:
-    # Arrange
+async def _paused_run(app: Akadze, end: Callable[[], object]) -> tuple[Worker, asyncio.Event]:
+    """Start task "demo" and hold its body until the event is set; then it calls end."""
+
     started = asyncio.Event()
     release = asyncio.Event()
 
     @app.task("demo", max_attempts=3)
-    async def demo() -> str:
+    async def demo() -> object:
         started.set()
         await release.wait()
-        return "done"
+        return end()
 
     async with app.engine.begin() as session:
         await demo.using(session=session).enqueue()
     worker = Worker(app)
     await worker._spawn()
     await started.wait()
+    return worker, release
+
+
+def _circular() -> object:
+    looped: list[object] = []
+    looped.append(looped)
+    return looped
+
+
+def _raise(exc: BaseException) -> Callable[[], object]:
+    def end() -> object:
+        raise exc
+
+    return end
+
+
+async def _change_row(database_url: str, change: str) -> None:
+    async with connection(database_url) as opened:
+        await opened.execute(f"UPDATE akadze.jobs SET {change} WHERE task = 'demo'")
+
+
+async def test_cancel_during_a_run_keeps_the_returned_result(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    worker, release = await _paused_run(app, lambda: "done")
     row = await job_row(database_url, "demo")
     assert row is not None
     async with app.engine.begin() as session:
@@ -122,9 +152,86 @@ async def test_cancel_during_a_run_discards_the_result(app: Akadze, database_url
     # Assert
     finished = await job_row(database_url, "demo")
     assert finished is not None
-    assert finished["state"] == "cancelled"
-    assert finished["attempt"] == 0
-    assert finished["result"] is None
+    assert finished["state"] == "succeeded"
+    assert as_json(finished["result"]) == "done"
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        _raise(Retry(timedelta(seconds=1))),
+        _raise(Snooze(timedelta(seconds=1))),
+        _raise(Fail("stop")),
+        _raise(RuntimeError("boom")),
+        lambda: object(),
+        lambda: {"score": float("nan")},
+        lambda: "a\x00b",
+        _circular,
+    ],
+    ids=["retry", "snooze", "fail", "error", "not-json", "nan", "nul", "circular"],
+)
+async def test_cancel_during_a_run_without_a_storable_result_cancels_without_an_attempt(
+    app: Akadze, database_url: str, end: Callable[[], object]
+) -> None:
+    # Arrange
+    worker, release = await _paused_run(app, end)
+    await _change_row(database_url, "cancel_requested_at = now()")
+
+    # Act
+    release.set()
+    await asyncio.gather(*worker.running)
+
+    # Assert
+    finished = await job_row(database_url, "demo")
+    assert finished is not None
+    assert (finished["state"], finished["attempt"]) == ("cancelled", 0)
+
+
+async def test_expiry_during_a_run_keeps_the_returned_result(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    worker, release = await _paused_run(app, lambda: "done")
+    await _change_row(database_url, "expires_at = now() - interval '1 second'")
+
+    # Act
+    release.set()
+    await asyncio.gather(*worker.running)
+
+    # Assert
+    finished = await job_row(database_url, "demo")
+    assert finished is not None
+    assert finished["state"] == "succeeded"
+    assert as_json(finished["result"]) == "done"
+
+
+def test_an_outcome_that_could_not_be_stored_fails_even_under_a_cancel() -> None:
+    # Arrange
+    job = Job(
+        id=1,
+        task="demo",
+        queue="default",
+        priority=0,
+        state="running",
+        args={},
+        run_count=1,
+        attempt=0,
+        max_attempts=3,
+        snoozes=0,
+        unique_key=None,
+        limit_key=None,
+        worker_id=None,
+        errors=[],
+        result=None,
+        cancel_requested_at=datetime.now(UTC),
+        expires_at=None,
+    )
+
+    # Act
+    outcome = decide(job, Fail("outcome could not be stored"), None, honor_cancel=False)
+
+    # Assert
+    assert (outcome.state, outcome.error_type) == ("failed", "Fail")
 
 
 async def test_cancel_requested_job_is_cancelled(app: Akadze, database_url: str) -> None:
@@ -292,3 +399,22 @@ async def test_shutdown_requeues_a_job_that_outlasts_the_timeout(
     assert row["state"] == "queued"
     assert row["attempt"] == 0
     assert row["worker_id"] is None
+
+
+async def test_a_circular_result_is_not_json(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("loop", max_attempts=1)
+    async def loop() -> object:
+        return _circular()
+
+    async with app.engine.begin() as session:
+        await loop.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "loop")
+    assert row is not None
+    assert row["state"] == "failed"
+    assert as_json(row["errors"])[0]["error"] == "ResultNotJson"
