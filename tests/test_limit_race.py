@@ -115,7 +115,14 @@ async def test_claim_leaves_a_limited_key_it_did_not_lock_for_the_next_claim(
 
     # Act
     async with app.engine.begin() as session:
-        jobs, _ = await _claim(session, worker_id=uuid4(), queue="default", limit=2, locked=[])
+        jobs, _ = await _claim(
+            session,
+            worker_id=uuid4(),
+            queue="default",
+            tasks=list(app.tasks),
+            limit=2,
+            locked=[],
+        )
 
     # Assert
     assert [job.task for job in jobs] == ["free"]

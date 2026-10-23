@@ -210,6 +210,7 @@ class Worker:
 
         full = False
         self._last_claim_full = False
+        tasks = list(self.app.tasks)
         for queue in self.queues:
             async with self.app.engine.begin() as connection:
                 await _cancel_due(connection, self.app.hooks, queue)
@@ -220,6 +221,7 @@ class Worker:
                     hooks=self.app.hooks,
                     worker_id=self.id,
                     queue=queue,
+                    tasks=tasks,
                     limit=limit,
                     fair=self.fair,
                 )
@@ -597,6 +599,7 @@ async def _claim_queue(
     hooks: Hooks,
     worker_id: UUID,
     queue: str,
+    tasks: list[str],
     limit: int,
     fair: bool,
 ) -> int:
@@ -618,9 +621,15 @@ async def _claim_queue(
     if not fair:
         head = limit * _HEAD_FACTOR
         savepoint = await connection.begin_nested()
-        locked = await _lock_limits(connection, queue=queue, head=head)
+        locked = await _lock_limits(connection, queue=queue, tasks=tasks, head=head)
         jobs, ready_rows = await _claim(
-            connection, worker_id=worker_id, queue=queue, limit=limit, locked=locked, head=head
+            connection,
+            worker_id=worker_id,
+            queue=queue,
+            tasks=tasks,
+            limit=limit,
+            locked=locked,
+            head=head,
         )
         if len(jobs) == limit or 0 < ready_rows < limit * _HEAD_FACTOR:
             await savepoint.commit()
@@ -628,9 +637,15 @@ async def _claim_queue(
             await savepoint.rollback()
             jobs = []
     if not jobs:
-        locked = await _lock_limits(connection, queue=queue, head=None)
+        locked = await _lock_limits(connection, queue=queue, tasks=tasks, head=None)
         jobs, _ = await _claim(
-            connection, worker_id=worker_id, queue=queue, limit=limit, locked=locked, fair=fair
+            connection,
+            worker_id=worker_id,
+            queue=queue,
+            tasks=tasks,
+            limit=limit,
+            locked=locked,
+            fair=fair,
         )
     for job in jobs:
         await hooks.ran_transition(connection, job, "queued", "running")
@@ -639,7 +654,11 @@ async def _claim_queue(
 
 
 def _ready_sql(head: int | None) -> str:
-    """Ready rows of :queue, or only the top :head of them."""
+    """Ready rows of :queue whose task is in :tasks, or only the top :head of them.
+
+    A job whose task this worker does not know stays queued for a worker that
+    does, so a rolling deploy does not spend its attempts.
+    """
 
     head_sql = (
         """
@@ -653,6 +672,7 @@ def _ready_sql(head: int | None) -> str:
         FROM akadze.jobs AS j
         WHERE j.state = 'queued'
           AND j.queue = :queue
+          AND j.task = ANY(CAST(:tasks AS text[]))
           AND j.run_at <= now()
           AND j.cancel_requested_at IS NULL
           AND (j.expires_at IS NULL OR j.expires_at > now())
@@ -663,7 +683,9 @@ def _ready_sql(head: int | None) -> str:
           ){head_sql}"""
 
 
-async def _lock_limits(connection: AsyncConnection, *, queue: str, head: int | None) -> list[str]:
+async def _lock_limits(
+    connection: AsyncConnection, *, queue: str, tasks: list[str], head: int | None
+) -> list[str]:
     """Lock the limits rows of the ready rows' keys and return those keys.
 
     This is its own statement because under READ COMMITTED a statement reads
@@ -688,7 +710,7 @@ async def _lock_limits(connection: AsyncConnection, *, queue: str, head: int | N
             FOR UPDATE
             """
         ),
-        {"queue": queue, "head": head},
+        {"queue": queue, "tasks": tasks, "head": head},
     )
     return [str(row[0]) for row in rows]
 
@@ -698,6 +720,7 @@ async def _claim(
     *,
     worker_id: UUID,
     queue: str,
+    tasks: list[str],
     limit: int,
     locked: list[str],
     fair: bool = False,
@@ -905,6 +928,7 @@ async def _claim(
         ),
         {
             "queue": queue,
+            "tasks": tasks,
             "limit": limit,
             "head": head,
             "worker_id": worker_id,

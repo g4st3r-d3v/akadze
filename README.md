@@ -145,7 +145,7 @@ async with current().complete_tx() as connection:
     await connection.execute(...)
 ```
 
-`akadze.testing.drain(app)` runs every job that is ready now. `assert_enqueued(app, "hello", name="ada")` checks that a queued or running job has those arguments.
+`akadze.testing.drain(app)` runs every job that is ready now and raises `AkadzeError` if a ready job's task is not registered on `app`. `assert_enqueued(app, "hello", name="ada")` checks that a queued or running job has those arguments.
 
 `queue_snapshot(engine)` reads committed rows: how many jobs are in each queue and state, how long the oldest ready job has waited, and how many are running. `list_jobs(engine, queue=..., state=..., limit=50, meta=...)` returns `JobSummary` rows (no args/result/errors), ordered by priority, then `run_at`, then id. `akadze jobs list` prints one summary per line.
 
@@ -160,6 +160,8 @@ Multi-tenant queues can claim fairly: `Worker(app, fair=True)` or `akadze worker
 Migration `005_jobs_meta` builds a GIN index on `akadze.jobs.meta`. The build blocks writes to `akadze.jobs` while it runs; on a large table, create it first with `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_meta_idx ON akadze.jobs USING gin (meta jsonb_path_ops)` and the migration skips it.
 
 Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
+
+A worker claims only jobs whose task is registered on its app. During a rolling deploy, a job of a task that only the new code defines stays `queued`, without spending an attempt, until a new worker takes it (workers on akadze 0.5.0 and older still claim it and spend attempts, so upgrade akadze before adding tasks). A job whose task no worker registers (a removed or renamed task) stays queued with no error, keeps its `unique_key` taken and counts in `queue_snapshot` lag; cancel such jobs with `akadze jobs cancel ID` (or `request_cancel`) when the task is removed. `akadze.testing.drain` raises `AkadzeError` on such a job instead.
 
 Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
 

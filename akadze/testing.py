@@ -15,18 +15,28 @@ from akadze.worker import Worker
 _DRAIN_LIMIT = 1000
 
 _READY = """
-    SELECT count(*)
+    SELECT
+        task,
+        bool_or(
+            cancel_requested_at IS NULL
+            AND (expires_at IS NULL OR expires_at > now())
+            AND NOT EXISTS (
+                SELECT 1 FROM akadze.queue_pauses WHERE queue_pauses.queue = jobs.queue
+            )
+        ) AS claimable
     FROM akadze.jobs
     WHERE state = 'queued'
-      AND queue = :queue
+      AND queue = ANY(CAST(:queues AS text[]))
       AND run_at <= now()
+    GROUP BY task
 """
 
 
 async def drain(app: Akadze, *, limit: int = _DRAIN_LIMIT) -> None:
     """Run every job that is ready now. Jobs scheduled in the future stay queued.
 
-    Raises AkadzeError if jobs are still ready after `limit` runs.
+    Raises AkadzeError if a ready job's task is not registered on ``app`` (a
+    worker would leave it queued), or if jobs are still ready after `limit` runs.
     """
 
     if limit < 1:
@@ -40,6 +50,21 @@ async def drain(app: Akadze, *, limit: int = _DRAIN_LIMIT) -> None:
     worker.queues = await _queues(app)
     if await _ready(app, worker.queues):
         raise AkadzeError("drain stopped: jobs are still ready")
+
+
+async def _ready(app: Akadze, queues: list[str]) -> bool:
+    """Whether any job is ready. Raises on a claimable job of an unregistered task.
+
+    A cancelled, expired or paused job is ready (a step cancels the first two)
+    but not claimable, so its task need not be registered.
+    """
+
+    async with app.engine.connect() as connection:
+        rows = (await connection.execute(text(_READY), {"queues": queues})).all()
+    unknown = sorted(str(row[0]) for row in rows if row[1] and row[0] not in app.tasks)
+    if unknown:
+        raise AkadzeError(f"drain stopped: tasks are not registered: {', '.join(unknown)}")
+    return bool(rows)
 
 
 async def assert_enqueued(app: Akadze, task: str, **arguments: Any) -> None:
@@ -87,12 +112,3 @@ async def _queues(app: Akadze) -> list[str]:
         )
         names.update(str(row[0]) for row in rows)
     return sorted(names) or ["default"]
-
-
-async def _ready(app: Akadze, queues: list[str]) -> bool:
-    async with app.engine.connect() as connection:
-        for queue in queues:
-            count = await connection.scalar(text(_READY), {"queue": queue})
-            if int(count or 0) > 0:
-                return True
-    return False
