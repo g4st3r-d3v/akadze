@@ -15,25 +15,33 @@ from akadze.worker import Worker
 _DRAIN_LIMIT = 1000
 
 _READY = """
-    SELECT
-        task,
-        bool_or(
-            cancel_requested_at IS NULL
-            AND (expires_at IS NULL OR expires_at > now())
-            AND NOT EXISTS (
+    WITH queued AS (
+        SELECT
+            task,
+            cancel_requested_at IS NOT NULL
+                OR (expires_at IS NOT NULL AND expires_at <= now()) AS due_to_cancel,
+            EXISTS (
                 SELECT 1 FROM akadze.queue_pauses WHERE queue_pauses.queue = jobs.queue
-            )
-        ) AS claimable
-    FROM akadze.jobs
-    WHERE state = 'queued'
-      AND queue = ANY(CAST(:queues AS text[]))
-      AND run_at <= now()
+            ) AS paused
+        FROM akadze.jobs
+        WHERE state = 'queued'
+          AND queue = ANY(CAST(:queues AS text[]))
+          AND run_at <= now()
+    )
+    SELECT task, bool_or(NOT due_to_cancel) AS claimable
+    FROM queued
+    WHERE due_to_cancel OR NOT paused
     GROUP BY task
 """
 
 
 async def drain(app: Akadze, *, limit: int = _DRAIN_LIMIT) -> None:
     """Run every job that is ready now. Jobs scheduled in the future stay queued.
+
+    Ready means a claim can take it, or a step cancels it (cancel requested,
+    expired). Jobs of a paused queue stay queued. Limits are not checked: a job
+    held back by ``max_starts`` keeps drain stepping until its window passes or
+    ``limit`` runs out.
 
     Raises AkadzeError if a ready job's task is not registered on ``app`` (a
     worker would leave it queued), or if jobs are still ready after `limit` runs.
@@ -55,8 +63,8 @@ async def drain(app: Akadze, *, limit: int = _DRAIN_LIMIT) -> None:
 async def _ready(app: Akadze, queues: list[str]) -> bool:
     """Whether any job is ready. Raises on a claimable job of an unregistered task.
 
-    A cancelled, expired or paused job is ready (a step cancels the first two)
-    but not claimable, so its task need not be registered.
+    A job a step will cancel is ready but not claimable, so its task need not
+    be registered.
     """
 
     async with app.engine.connect() as connection:
