@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import sys
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -175,3 +178,49 @@ async def test_include_may_call_app_register(
 
     # Assert
     assert "greet" in app.tasks
+
+
+def _sync_work() -> None:
+    return None
+
+
+async def _async_work() -> None:
+    return None
+
+
+async def test_register_warns_once_for_a_sync_task_with_timeout(
+    app: Akadze, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange
+    caplog.set_level(logging.WARNING, logger="akadze")
+
+    # Act
+    app.register(_sync_work, name="sync", timeout=timedelta(seconds=5))
+
+    # Assert
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert [record.getMessage() for record in warnings] == [
+        "task sync is sync: its timeout does not stop its thread, "
+        "so a retry can run while it is still running"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fn", "timeout"),
+    [(_async_work, timedelta(seconds=5)), (_sync_work, None)],
+    ids=["async-with-timeout", "sync-without-timeout"],
+)
+async def test_register_does_not_warn_without_a_sync_timeout(
+    app: Akadze,
+    caplog: pytest.LogCaptureFixture,
+    fn: Callable[[], Any],
+    timeout: timedelta | None,
+) -> None:
+    # Arrange
+    caplog.set_level(logging.WARNING, logger="akadze")
+
+    # Act
+    app.register(fn, name="work", timeout=timeout)
+
+    # Assert
+    assert not [record for record in caplog.records if record.levelno == logging.WARNING]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
@@ -16,6 +17,8 @@ from akadze.outcome import BackoffPolicy
 from akadze.periodic import Schedule, ScheduleSpec, check_schedule
 from akadze.schema import async_database_url
 from akadze.task import Task
+
+logger = logging.getLogger("akadze")
 
 _SCHEDULE_SPEC_KEYS = frozenset({"name", "cron", "every", "overlap", "queue", "timezone"})
 
@@ -71,6 +74,11 @@ class Akadze:
 
         Same options and validation as ``@app.task``. Returns the registered
         ``Task`` so the caller can enqueue it.
+
+        ``timeout`` is not a hard limit for a sync callable: it runs in a
+        thread, which keeps running after the timeout while the job is retried,
+        so a retry can overlap it. Registering one with ``timeout`` logs a
+        warning.
         """
         if max_attempts < 1:
             raise AkadzeError("max_attempts must be at least 1")
@@ -91,6 +99,12 @@ class Akadze:
             backoff=backoff,
         )
         self.tasks[name] = registered
+        if timeout is not None and not inspect.iscoroutinefunction(fn):
+            logger.warning(
+                "task %s is sync: its timeout does not stop its thread, "
+                "so a retry can run while it is still running",
+                name,
+            )
         return registered
 
     def task[**P](

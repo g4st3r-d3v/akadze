@@ -103,7 +103,7 @@ def create_app(deps: Deps) -> Akadze:
     return app
 ```
 
-`app.register(fn, *, name, queue=..., max_attempts=..., timeout=..., priority=...)` is equivalent to `@app.task(...)` without decorating on a live instance. It returns the registered `Task`.
+`app.register(fn, *, name, queue=..., max_attempts=..., timeout=..., priority=...)` is equivalent to `@app.task(...)` without decorating on a live instance. It returns the registered `Task`. A sync callable with `timeout` logs a warning: the timeout does not stop its thread, so a retry can overlap it.
 
 Schedules can also come from app config without a `@periodic` registrar per service. Parse YAML/TOML/JSON in the app, turn rows into already-parsed specs (`cron` text or `timedelta` — not duration strings), then call `add_schedule` / `add_schedules`. The task must already be in `app.tasks`; the worker tick is unchanged.
 
