@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     jobs_requeue = jobs_sub.add_parser("requeue", help="Return a failed job to the queue")
     jobs_requeue.add_argument("job_id", type=int)
     jobs_cancel = jobs_sub.add_parser(
-        "cancel", help="Cancel a queued job; a running one is cancelled only if it raises"
+        "cancel", help="Cancel a queued job; a running one is cancelled unless it returns"
     )
     jobs_cancel.add_argument("job_id", type=int)
 

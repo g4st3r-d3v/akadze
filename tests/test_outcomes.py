@@ -8,7 +8,7 @@ import pytest
 
 from akadze import Akadze, Cancel, Fail, Retry, Snooze, request_cancel
 from akadze.job import Job
-from akadze.outcome import Unstored, decide
+from akadze.outcome import decide
 from akadze.worker import Worker
 from tests.factories import insert_job
 from tests.pg import as_json, connection, job_row
@@ -117,6 +117,12 @@ async def _paused_run(app: Akadze, end: Callable[[], object]) -> tuple[Worker, a
     return worker, release
 
 
+def _circular() -> object:
+    looped: list[object] = []
+    looped.append(looped)
+    return looped
+
+
 def _raise(exc: BaseException) -> Callable[[], object]:
     def end() -> object:
         raise exc
@@ -158,10 +164,13 @@ async def test_cancel_during_a_run_keeps_the_returned_result(
         _raise(Fail("stop")),
         _raise(RuntimeError("boom")),
         lambda: object(),
+        lambda: {"score": float("nan")},
+        lambda: "a\x00b",
+        _circular,
     ],
-    ids=["retry", "snooze", "fail", "error", "result-not-json"],
+    ids=["retry", "snooze", "fail", "error", "not-json", "nan", "nul", "circular"],
 )
-async def test_cancel_during_a_run_that_does_not_return_a_result_cancels_without_an_attempt(
+async def test_cancel_during_a_run_without_a_storable_result_cancels_without_an_attempt(
     app: Akadze, database_url: str, end: Callable[[], object]
 ) -> None:
     # Arrange
@@ -196,7 +205,7 @@ async def test_expiry_during_a_run_keeps_the_returned_result(
     assert as_json(finished["result"]) == "done"
 
 
-def test_an_unstored_outcome_fails_even_under_a_cancel() -> None:
+def test_an_outcome_that_could_not_be_stored_fails_even_under_a_cancel() -> None:
     # Arrange
     job = Job(
         id=1,
@@ -219,7 +228,7 @@ def test_an_unstored_outcome_fails_even_under_a_cancel() -> None:
     )
 
     # Act
-    outcome = decide(job, Unstored("outcome could not be stored"), None)
+    outcome = decide(job, Fail("outcome could not be stored"), None, honor_cancel=False)
 
     # Assert
     assert (outcome.state, outcome.error_type) == ("failed", "Fail")
@@ -390,3 +399,22 @@ async def test_shutdown_requeues_a_job_that_outlasts_the_timeout(
     assert row["state"] == "queued"
     assert row["attempt"] == 0
     assert row["worker_id"] is None
+
+
+async def test_a_circular_result_is_not_json(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("loop", max_attempts=1)
+    async def loop() -> object:
+        return _circular()
+
+    async with app.engine.begin() as session:
+        await loop.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "loop")
+    assert row is not None
+    assert row["state"] == "failed"
+    assert as_json(row["errors"])[0]["error"] == "ResultNotJson"

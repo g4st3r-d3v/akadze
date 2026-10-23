@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from akadze.args import load_arguments
 from akadze.context import bind_run, reset_run
-from akadze.exc import AkadzeError, Cancel
+from akadze.exc import AkadzeError, Cancel, Fail
 from akadze.hooks import Hooks
 from akadze.job import (
     _COLUMNS,
@@ -34,7 +34,7 @@ from akadze.job import (
     running_jobs,
 )
 from akadze.maintenance import prune, rescue
-from akadze.outcome import BackoffPolicy, Unstored, decide, push_error
+from akadze.outcome import BackoffPolicy, decide, push_error
 from akadze.periodic import schedule_due
 from akadze.schema import DB_ERRORS, is_transient_db_error, public_db_error
 
@@ -489,7 +489,7 @@ class Worker:
                 return
             except DB_ERRORS as error:
                 if not is_transient_db_error(error):
-                    await self._record_unstorable(job, error, policy)
+                    await self._record_unstorable(job, error, policy, returned=exc is None)
                     return
                 failures += 1
                 if self._stale():
@@ -507,11 +507,21 @@ class Worker:
                 )
 
     async def _record_unstorable(
-        self, job: Job, error: BaseException, policy: BackoffPolicy | None
+        self, job: Job, error: BaseException, policy: BackoffPolicy | None, *, returned: bool
     ) -> None:
-        reason = Unstored(f"outcome could not be stored: {public_db_error(error)}")
+        """Fail the job. A body that returned is not turned into a cancel: it ran."""
+
+        reason = Fail(f"outcome could not be stored: {public_db_error(error)}")
         try:
-            await _finish(self.app.engine, self.app.hooks, job, reason, None, policy)
+            await _finish(
+                self.app.engine,
+                self.app.hooks,
+                job,
+                reason,
+                None,
+                policy,
+                honor_cancel=not returned,
+            )
         except DB_ERRORS as again:
             self._fatal = again
             logger.error(
@@ -994,13 +1004,17 @@ async def _finish(
     exc: BaseException | None,
     result: object,
     policy: BackoffPolicy | None = None,
+    *,
+    honor_cancel: bool = True,
 ) -> None:
     async with engine.begin() as connection:
         current = await job_by_id(connection, job.id)
         if not _owns(current, job):
             logger.info("job %s finish discarded", job.id)
             return
-        if not await _apply(connection, hooks, current, exc, result, policy):
+        if not await _apply(
+            connection, hooks, current, exc, result, policy, honor_cancel=honor_cancel
+        ):
             logger.info("job %s finish discarded", job.id)
 
 
@@ -1011,8 +1025,10 @@ async def _apply(
     exc: BaseException | None,
     result: object,
     policy: BackoffPolicy | None = None,
+    *,
+    honor_cancel: bool = True,
 ) -> bool:
-    outcome = decide(job, exc, result, policy)
+    outcome = decide(job, exc, result, policy, honor_cancel=honor_cancel)
     errors = push_error(list(job.errors), outcome)
     updated = await connection.execute(
         text(
