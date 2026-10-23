@@ -965,11 +965,15 @@ async def _release(connection: AsyncConnection, hooks: Hooks, worker_id: UUID) -
 
 
 async def _complete_open_run(connection: AsyncConnection, hooks: Hooks, job: Job) -> None:
+    """Finish the job as succeeded in the complete_tx transaction.
+
+    A cancel requested, or an expiry reached, while the block ran does not stop
+    it: the block reached its end, so its writes and ``succeeded`` commit.
+    """
+
     current = await job_by_id(connection, job.id)
     if not _owns(current, job):
         raise AkadzeError("this run no longer owns the job")
-    if current.cancel_requested_at is not None or current.expired:
-        raise Cancel()
     if not await _apply(connection, hooks, current, None, None):
         raise AkadzeError("this run no longer owns the job")
 
@@ -1008,7 +1012,10 @@ async def _apply(
     result: object,
     policy: BackoffPolicy | None = None,
 ) -> bool:
-    if job.cancel_requested_at is not None or job.expired:
+    # A body that returned succeeded, and its side effects happened, even if a
+    # cancel or the expiry came while it ran. A body that raised meanwhile is
+    # cancelled without spending an attempt, whatever it raised.
+    if exc is not None and (job.cancel_requested_at is not None or job.expired):
         exc = Cancel()
         result = None
     outcome = decide(job, exc, result, policy)
