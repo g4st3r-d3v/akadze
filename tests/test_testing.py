@@ -101,3 +101,24 @@ async def test_drain_stops_when_jobs_stay_ready(app: Akadze, database_url: str) 
             "SELECT count(*) FROM akadze.jobs WHERE task = 'again' AND state = 'queued'"
         )
     assert queued == 1
+
+
+async def test_drain_rejects_a_ready_task_that_is_not_registered(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    other = Akadze(database_url=database_url)
+
+    @other.task("unknown")
+    async def unknown() -> None:
+        return None
+
+    try:
+        async with other.engine.begin() as session:
+            await unknown.using(session=session).enqueue()
+    finally:
+        await other.aclose()
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="not registered: unknown"):
+        await drain(app)
