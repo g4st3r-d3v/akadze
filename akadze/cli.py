@@ -11,6 +11,7 @@ import signal
 import sys
 from datetime import datetime, timedelta
 
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -256,6 +257,11 @@ async def _cancel_job(database_url: str, job_id: int) -> None:
     engine = _cli_engine(database_url)
     try:
         async with engine.begin() as session:
+            state = await session.scalar(
+                text("SELECT state FROM akadze.jobs WHERE id = :id FOR UPDATE"), {"id": job_id}
+            )
+            if state not in ("queued", "running"):
+                raise AkadzeError("job is not active")
             await request_cancel(session, job_id)
     finally:
         await engine.dispose()

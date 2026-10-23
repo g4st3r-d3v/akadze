@@ -77,10 +77,10 @@ async def test_cli_jobs_cancel_marks_queued_job(app: Akadze, database_url: str) 
 
 
 @pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled"])
-async def test_cli_jobs_cancel_terminal_state_exits_zero(
+async def test_cli_jobs_cancel_terminal_state_exits_one(
     app: Akadze, database_url: str, state: str
 ) -> None:
-    # Arrange — request_cancel is a no-op; CLI mirrors that (exit 0)
+    # Arrange — request_cancel stays a no-op; the CLI reports it
     job_id = await insert_job(app.engine, task="demo", state=state)
     env = os.environ.copy()
     env["AKADZE_DATABASE_URL"] = database_url
@@ -89,13 +89,14 @@ async def test_cli_jobs_cancel_terminal_state_exits_zero(
     result = _cli(env, "jobs", "cancel", str(job_id))
 
     # Assert
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1
+    assert "job is not active" in result.stderr
     row = await job_row(database_url, "demo")
     assert row is not None
     assert row["cancel_requested_at"] is None
 
 
-async def test_cli_jobs_cancel_missing_id_exits_zero(app: Akadze, database_url: str) -> None:
+async def test_cli_jobs_cancel_missing_id_exits_one(app: Akadze, database_url: str) -> None:
     # Arrange
     env = os.environ.copy()
     env["AKADZE_DATABASE_URL"] = database_url
@@ -104,7 +105,8 @@ async def test_cli_jobs_cancel_missing_id_exits_zero(app: Akadze, database_url: 
     result = _cli(env, "jobs", "cancel", "9999999")
 
     # Assert
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1
+    assert "job is not active" in result.stderr
 
 
 def test_cli_jobs_cancel_requires_database_url() -> None:
