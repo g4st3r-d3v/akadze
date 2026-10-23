@@ -232,3 +232,24 @@ def test_register_does_not_warn_without_a_sync_timeout(
 
     # Assert
     assert _app_warnings(caplog) == []
+
+
+async def test_sync_wrapper_returning_a_coroutine_is_awaited(app: Akadze) -> None:
+    # Arrange
+    seen: list[int] = []
+
+    async def body(item: int) -> None:
+        seen.append(item)
+
+    def wrapper(item: int) -> Any:
+        return body(item)
+
+    registered = app.register(wrapper, name="wrapped")
+    async with app.engine.begin() as session:
+        await registered.using(session=session).enqueue(item=3)
+
+    # Act
+    await drain(app)
+
+    # Assert
+    assert seen == [3]
