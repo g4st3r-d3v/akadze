@@ -188,20 +188,28 @@ async def _async_work() -> None:
     return None
 
 
-async def test_register_warns_once_for_a_sync_task_with_timeout(
-    app: Akadze, caplog: pytest.LogCaptureFixture
+def _app_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "akadze.app" and record.levelno == logging.WARNING
+    ]
+
+
+def test_register_warns_once_for_a_sync_task_with_timeout(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Arrange
-    caplog.set_level(logging.WARNING, logger="akadze")
+    app = Akadze(database_url="postgresql://unused/akadze")
+    caplog.set_level(logging.WARNING, logger="akadze.app")
 
     # Act
     app.register(_sync_work, name="sync", timeout=timedelta(seconds=5))
 
     # Assert
-    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert [record.getMessage() for record in warnings] == [
+    assert _app_warnings(caplog) == [
         "task sync is sync: its timeout does not stop its thread, "
-        "so a retry can run while it is still running"
+        "which keeps running after the job is retried or failed"
     ]
 
 
@@ -210,17 +218,17 @@ async def test_register_warns_once_for_a_sync_task_with_timeout(
     [(_async_work, timedelta(seconds=5)), (_sync_work, None)],
     ids=["async-with-timeout", "sync-without-timeout"],
 )
-async def test_register_does_not_warn_without_a_sync_timeout(
-    app: Akadze,
+def test_register_does_not_warn_without_a_sync_timeout(
     caplog: pytest.LogCaptureFixture,
     fn: Callable[[], Any],
     timeout: timedelta | None,
 ) -> None:
     # Arrange
-    caplog.set_level(logging.WARNING, logger="akadze")
+    app = Akadze(database_url="postgresql://unused/akadze")
+    caplog.set_level(logging.WARNING, logger="akadze.app")
 
     # Act
     app.register(fn, name="work", timeout=timeout)
 
     # Assert
-    assert not [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert _app_warnings(caplog) == []

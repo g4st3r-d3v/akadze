@@ -103,7 +103,7 @@ def create_app(deps: Deps) -> Akadze:
     return app
 ```
 
-`app.register(fn, *, name, queue=..., max_attempts=..., timeout=..., priority=...)` is equivalent to `@app.task(...)` without decorating on a live instance. It returns the registered `Task`. A sync callable with `timeout` logs a warning: the timeout does not stop its thread, so a retry can overlap it.
+`app.register(fn, *, name, queue=..., max_attempts=..., timeout=..., priority=...)` is equivalent to `@app.task(...)` without decorating on a live instance. It returns the registered `Task`. A sync callable with `timeout` logs a warning on logger `akadze.app` (see `timeout` under [Retries and control flow](#3-retries-and-control-flow)).
 
 Schedules can also come from app config without a `@periodic` registrar per service. Parse YAML/TOML/JSON in the app, turn rows into already-parsed specs (`cron` text or `timedelta` — not duration strings), then call `add_schedule` / `add_schedules`. The task must already be in `app.tasks`; the worker tick is unchanged.
 
@@ -185,7 +185,7 @@ async def send_mail(user_id: int) -> None: ...
 
 `max_attempts` is the attempt budget including the first run, so Celery's `max_retries=5` is `max_attempts=6`. The default is 3: a Celery task without retries that must not run twice (a charge, an SMS) needs `max_attempts=1`. An error, `Retry`, a timeout and a worker lost by another worker's heartbeat check each spend an attempt; `Snooze` and a graceful shutdown do not.
 
-`timeout` is not a hard `time_limit`. When it fires, the run counts as an error and is retried with backoff, not failed. A sync task keeps running in its thread after the timeout, so a retry can overlap it; give sync tasks their own deadline. There is no `shared_task`: modules expose `register(app)` and the app calls `include`, or a factory binds plain callables with `app.register` (see above).
+`timeout` is not a hard `time_limit`. When it fires, the run counts as an error and is retried with backoff, not failed. A sync task keeps running in its thread after the timeout, so a retry can overlap it, and the thread no longer counts against `slots` (repeated timeouts can fill the default thread pool); give sync tasks their own deadline. There is no `shared_task`: modules expose `register(app)` and the app calls `include`, or a factory binds plain callables with `app.register` (see above).
 
 ### 2. Enqueue
 

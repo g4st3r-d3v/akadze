@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -547,7 +546,7 @@ class Worker:
 
         async def body() -> object:
             await self.app.hooks.run_before(fresh)
-            if inspect.iscoroutinefunction(registered.fn):
+            if registered.is_async:
                 value = await registered.fn(**arguments)
             else:
                 value = await asyncio.to_thread(partial(registered.fn, **arguments))
