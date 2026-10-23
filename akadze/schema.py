@@ -222,10 +222,13 @@ def _check_scripts(scripts: list[tuple[str, str]]) -> None:
     """Reject what a split on ``;`` would break: dollar quotes, ``;`` in a comment or string."""
 
     for version, script in scripts:
-        if "$$" in script:
+        if _DOLLAR_QUOTE.search(script):
             raise MigrateError(f"migration {version} contains dollar quotes")
         if _quoted_semicolon(script):
             raise MigrateError(f"migration {version} has ; inside a comment or string")
+
+
+_DOLLAR_QUOTE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 
 
 def _quoted_semicolon(script: str) -> bool:
@@ -233,23 +236,14 @@ def _quoted_semicolon(script: str) -> bool:
 
     index = 0
     while index < len(script):
-        char = script[index]
         if script.startswith("--", index):
             end = script.find("\n", index)
             end = len(script) if end == -1 else end
         elif script.startswith("/*", index):
-            end = script.find("*/", index + 2)
-            end = len(script) if end == -1 else end + 2
-        elif char in "'\"":
-            end = index + 1
-            while end < len(script):
-                if script[end] == char:
-                    if script[end + 1 : end + 2] == char:
-                        end += 2
-                        continue
-                    break
-                end += 1
-            end += 1
+            end = _block_comment_end(script, index)
+        elif script[index] in "'\"":
+            escapes = script[index] == "'" and script[index - 1 : index] in ("E", "e")
+            end = _quoted_end(script, index, escapes=escapes)
         else:
             index += 1
             continue
@@ -257,6 +251,44 @@ def _quoted_semicolon(script: str) -> bool:
             return True
         index = end
     return False
+
+
+def _block_comment_end(script: str, start: int) -> int:
+    """End of the ``/* */`` comment at start; Postgres nests them."""
+
+    depth = 0
+    index = start
+    while index < len(script):
+        if script.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif script.startswith("*/", index):
+            depth -= 1
+            index += 2
+            if depth == 0:
+                return index
+        else:
+            index += 1
+    return len(script)
+
+
+def _quoted_end(script: str, start: int, *, escapes: bool) -> int:
+    """End of the quoted token at start: a doubled quote stays inside, as does ``\\'`` in E''."""
+
+    quote = script[start]
+    index = start + 1
+    while index < len(script):
+        char = script[index]
+        if escapes and char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            if script[index + 1 : index + 2] == quote:
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return len(script)
 
 
 def _public_db_error(exc: BaseException, database_url: str) -> str:

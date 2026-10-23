@@ -333,8 +333,18 @@ async def test_dollar_quotes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> No
         "COMMENT ON TABLE t IS 'a; b';",
         "COMMENT ON TABLE t IS 'it''s; here';",
         'CREATE TABLE "a;b" (id int);',
+        "/* outer /* inner */ still; comment */ SELECT 1;",
+        "COMMENT ON TABLE t IS E'it\\'s; here';",
     ],
-    ids=["line-comment", "block-comment", "string", "escaped-quote-string", "identifier"],
+    ids=[
+        "line-comment",
+        "block-comment",
+        "string",
+        "escaped-quote-string",
+        "identifier",
+        "nested-block-comment",
+        "escape-string",
+    ],
 )
 async def test_semicolon_inside_a_comment_or_string_is_rejected(
     monkeypatch: pytest.MonkeyPatch, script: str
@@ -350,3 +360,27 @@ async def test_semicolon_inside_a_comment_or_string_is_rejected(
 def test_packaged_migrations_pass_the_script_check() -> None:
     # Act / Assert
     _check_scripts(_migration_scripts())
+
+
+async def test_tagged_dollar_quotes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    script = "CREATE FUNCTION f() RETURNS int AS $body$ SELECT 1; $body$ LANGUAGE sql;"
+    monkeypatch.setattr("akadze.schema._migration_scripts", lambda: [("001_bad", script)])
+
+    # Act / Assert
+    with pytest.raises(MigrateError, match="dollar quotes"):
+        await migrate("postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "COMMENT ON TABLE t IS 'it''s fine'; SELECT 1;",
+        "/* a /* b */ c */ SELECT 1; -- done\nSELECT 2;",
+        "COMMENT ON TABLE t IS E'a\\'b'; SELECT 1;",
+    ],
+    ids=["escaped-quote", "nested-comment", "escape-string"],
+)
+def test_semicolons_between_statements_pass_the_script_check(script: str) -> None:
+    # Act / Assert
+    _check_scripts([("001_ok", script)])
