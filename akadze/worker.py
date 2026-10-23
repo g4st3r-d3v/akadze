@@ -210,6 +210,7 @@ class Worker:
 
         full = False
         self._last_claim_full = False
+        tasks = list(self.app.tasks)
         for queue in self.queues:
             async with self.app.engine.begin() as connection:
                 await _cancel_due(connection, self.app.hooks, queue)
@@ -220,7 +221,7 @@ class Worker:
                     hooks=self.app.hooks,
                     worker_id=self.id,
                     queue=queue,
-                    tasks=list(self.app.tasks),
+                    tasks=tasks,
                     limit=limit,
                     fair=self.fair,
                 )

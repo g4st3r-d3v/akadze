@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from akadze import Akadze, AkadzeError
+from akadze import Akadze, AkadzeError, request_cancel
 from akadze.testing import assert_enqueued, drain
 from tests.pg import connection, job_row
 
@@ -122,3 +122,32 @@ async def test_drain_rejects_a_ready_task_that_is_not_registered(
     # Act / Assert
     with pytest.raises(AkadzeError, match="not registered: unknown"):
         await drain(app)
+
+
+async def test_drain_cancels_an_unregistered_job_whose_cancel_was_requested(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    other = Akadze(database_url=database_url)
+
+    @other.task("unknown")
+    async def unknown() -> None:
+        return None
+
+    try:
+        async with other.engine.begin() as session:
+            await unknown.using(session=session).enqueue()
+    finally:
+        await other.aclose()
+    row = await job_row(database_url, "unknown")
+    assert row is not None
+    async with app.engine.begin() as session:
+        await request_cancel(session, int(row["id"]))
+
+    # Act
+    await drain(app)
+
+    # Assert
+    cancelled = await job_row(database_url, "unknown")
+    assert cancelled is not None
+    assert cancelled["state"] == "cancelled"

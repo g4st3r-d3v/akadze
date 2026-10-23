@@ -161,7 +161,7 @@ Migration `005_jobs_meta` builds a GIN index on `akadze.jobs.meta`. The build bl
 
 Do not copy this package's SQL into the application's Alembic history. Deploy runs `akadze migrate`, or `await migrate(database_url)`, against the same database. The engine disables asyncpg's statement cache so a transaction-mode pool such as PgBouncer can sit in front.
 
-A worker claims only jobs whose task is registered on its app. During a rolling deploy, a job of a task that only the new code defines stays `queued`, without spending an attempt, until a new worker takes it. A job whose task no worker registers (a removed or renamed task) stays queued with no error; `queue_snapshot` still counts it. `akadze.testing.drain` raises `AkadzeError` on such a job instead.
+A worker claims only jobs whose task is registered on its app. During a rolling deploy, a job of a task that only the new code defines stays `queued`, without spending an attempt, until a new worker takes it (workers on akadze 0.5.0 and older still claim it and spend attempts, so upgrade akadze before adding tasks). A job whose task no worker registers (a removed or renamed task) stays queued with no error, keeps its `unique_key` taken and counts in `queue_snapshot` lag; cancel such jobs with `akadze jobs cancel ID` (or `request_cancel`) when the task is removed. `akadze.testing.drain` raises `AkadzeError` on such a job instead.
 
 Tests use `AKADZE_DATABASE_URL` and drop schema `akadze` in that database. The database name must be `akadze` or end with `_test`.
 

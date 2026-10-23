@@ -15,11 +15,20 @@ from akadze.worker import Worker
 _DRAIN_LIMIT = 1000
 
 _READY = """
-    SELECT DISTINCT task
+    SELECT
+        task,
+        bool_or(
+            cancel_requested_at IS NULL
+            AND (expires_at IS NULL OR expires_at > now())
+            AND NOT EXISTS (
+                SELECT 1 FROM akadze.queue_pauses WHERE queue_pauses.queue = jobs.queue
+            )
+        ) AS claimable
     FROM akadze.jobs
     WHERE state = 'queued'
-      AND queue = :queue
+      AND queue = ANY(CAST(:queues AS text[]))
       AND run_at <= now()
+    GROUP BY task
 """
 
 
@@ -44,17 +53,18 @@ async def drain(app: Akadze, *, limit: int = _DRAIN_LIMIT) -> None:
 
 
 async def _ready(app: Akadze, queues: list[str]) -> bool:
-    """Whether any registered task is ready. Raises on a ready unregistered task."""
+    """Whether any job is ready. Raises on a claimable job of an unregistered task.
 
-    names: set[str] = set()
+    A cancelled, expired or paused job is ready (a step cancels the first two)
+    but not claimable, so its task need not be registered.
+    """
+
     async with app.engine.connect() as connection:
-        for queue in queues:
-            rows = await connection.execute(text(_READY), {"queue": queue})
-            names.update(str(row[0]) for row in rows)
-    unknown = sorted(names - app.tasks.keys())
+        rows = (await connection.execute(text(_READY), {"queues": queues})).all()
+    unknown = sorted(str(row[0]) for row in rows if row[1] and row[0] not in app.tasks)
     if unknown:
         raise AkadzeError(f"drain stopped: tasks are not registered: {', '.join(unknown)}")
-    return bool(names)
+    return bool(rows)
 
 
 async def assert_enqueued(app: Akadze, task: str, **arguments: Any) -> None:
