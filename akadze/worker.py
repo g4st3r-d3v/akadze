@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -550,6 +551,9 @@ class Worker:
                 value = await registered.fn(**arguments)
             else:
                 value = await asyncio.to_thread(partial(registered.fn, **arguments))
+                if inspect.isawaitable(value):
+                    # A wrapper that hides a coroutine function returns its coroutine.
+                    value = await value
             await self.app.hooks.run_after(fresh)
             return value
 

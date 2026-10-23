@@ -6,6 +6,7 @@ import pytest
 
 from akadze import Akadze, AkadzeError, request_cancel
 from akadze.testing import assert_enqueued, drain
+from tests.factories import pause
 from tests.pg import connection, job_row
 
 
@@ -151,3 +152,22 @@ async def test_drain_cancels_an_unregistered_job_whose_cancel_was_requested(
     cancelled = await job_row(database_url, "unknown")
     assert cancelled is not None
     assert cancelled["state"] == "cancelled"
+
+
+async def test_drain_leaves_a_paused_queue_queued(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("held", queue="held")
+    async def held() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await held.using(session=session).enqueue()
+    await pause(app.engine, "held")
+
+    # Act
+    await drain(app, limit=2)
+
+    # Assert
+    row = await job_row(database_url, "held")
+    assert row is not None
+    assert row["state"] == "queued"

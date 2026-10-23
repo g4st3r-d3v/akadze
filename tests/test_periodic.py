@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from akadze import Akadze
 from akadze.periodic import schedule_due
@@ -47,3 +49,35 @@ async def test_overlap_false_skips_while_the_previous_job_is_queued(
     assert len(rows) == 1
     assert rows[0]["unique_key"] == "periodic:tick"
     assert rows[0]["state"] == "queued"
+
+
+async def test_overlap_false_enqueues_the_held_fire_once_the_previous_job_finished(
+    app: Akadze, database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange — the clock is pinned to fires, so the held fire is the one that runs
+    @app.periodic("tick", every=timedelta(hours=1), overlap=False)
+    async def tick() -> None:
+        return None
+
+    first = datetime.now(UTC) - timedelta(seconds=2)
+    held = first + timedelta(seconds=1)
+    fire = [first]
+    monkeypatch.setattr("akadze.periodic.previous_fire", lambda schedule, now: fire[0])
+    await schedule_due(app)
+    fire[0] = held
+    await schedule_due(app)
+    assert len(await job_rows(database_url)) == 1
+    async with connection(database_url) as opened:
+        await opened.execute(
+            "UPDATE akadze.jobs SET state = 'succeeded', finished_at = now() WHERE task = 'tick'"
+        )
+
+    # Act
+    await schedule_due(app)
+
+    # Assert
+    rows = await job_rows(database_url)
+    assert [row["state"] for row in rows] == ["succeeded", "queued"]
+    async with connection(database_url) as opened:
+        fires = await opened.fetch("SELECT fire_at FROM akadze.periodic_runs ORDER BY fire_at")
+    assert [row["fire_at"] for row in fires] == [first, held]
