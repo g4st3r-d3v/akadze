@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Generic, ParamSpec
@@ -39,6 +40,8 @@ class Task(Generic[P]):
         self.priority = priority
         self.backoff = backoff
         self.arguments: type[BaseModel] = argument_model(fn)
+        # A sync fn runs in a thread; the worker and the timeout warning both read this.
+        self.is_async = inspect.iscoroutinefunction(fn)
 
     def using(
         self,
