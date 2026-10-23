@@ -144,7 +144,7 @@ async def migrate(database_url: str) -> None:
     """Apply pending migrations. This command does not return database state."""
 
     scripts = _migration_scripts()
-    _reject_dollar_quotes(scripts)
+    _check_scripts(scripts)
     async with _connection(database_url) as conn:
         async with conn.begin():
             await _apply(conn, scripts)
@@ -218,10 +218,45 @@ def _migration_scripts() -> list[tuple[str, str]]:
     return scripts
 
 
-def _reject_dollar_quotes(scripts: list[tuple[str, str]]) -> None:
+def _check_scripts(scripts: list[tuple[str, str]]) -> None:
+    """Reject what a split on ``;`` would break: dollar quotes, ``;`` in a comment or string."""
+
     for version, script in scripts:
         if "$$" in script:
             raise MigrateError(f"migration {version} contains dollar quotes")
+        if _quoted_semicolon(script):
+            raise MigrateError(f"migration {version} has ; inside a comment or string")
+
+
+def _quoted_semicolon(script: str) -> bool:
+    """Whether a ``;`` sits in a ``--`` or ``/* */`` comment, or a quoted string or identifier."""
+
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if script.startswith("--", index):
+            end = script.find("\n", index)
+            end = len(script) if end == -1 else end
+        elif script.startswith("/*", index):
+            end = script.find("*/", index + 2)
+            end = len(script) if end == -1 else end + 2
+        elif char in "'\"":
+            end = index + 1
+            while end < len(script):
+                if script[end] == char:
+                    if script[end + 1 : end + 2] == char:
+                        end += 2
+                        continue
+                    break
+                end += 1
+            end += 1
+        else:
+            index += 1
+            continue
+        if ";" in script[index:end]:
+            return True
+        index = end
+    return False
 
 
 def _public_db_error(exc: BaseException, database_url: str) -> str:

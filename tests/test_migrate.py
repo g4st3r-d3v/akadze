@@ -10,7 +10,7 @@ import asyncpg
 import pytest
 
 from akadze import Akadze, applied_versions, migrate
-from akadze.schema import MigrateError
+from akadze.schema import MigrateError, _check_scripts, _migration_scripts
 from tests.factories import insert_job
 from tests.pg import connection, job_rows
 
@@ -323,3 +323,30 @@ async def test_dollar_quotes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> No
     with pytest.raises(MigrateError, match="dollar quotes") as caught:
         await migrate("postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze")
     assert "super-secret-pw" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "-- drop; recreate\nSELECT 1;",
+        "/* one; two */ SELECT 1;",
+        "COMMENT ON TABLE t IS 'a; b';",
+        "COMMENT ON TABLE t IS 'it''s; here';",
+        'CREATE TABLE "a;b" (id int);',
+    ],
+    ids=["line-comment", "block-comment", "string", "escaped-quote-string", "identifier"],
+)
+async def test_semicolon_inside_a_comment_or_string_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, script: str
+) -> None:
+    # Arrange
+    monkeypatch.setattr("akadze.schema._migration_scripts", lambda: [("001_bad", script)])
+
+    # Act / Assert
+    with pytest.raises(MigrateError, match="; inside a comment or string"):
+        await migrate("postgresql://akadze:super-secret-pw@127.0.0.1:1/akadze")
+
+
+def test_packaged_migrations_pass_the_script_check() -> None:
+    # Act / Assert
+    _check_scripts(_migration_scripts())
