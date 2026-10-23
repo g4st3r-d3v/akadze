@@ -202,7 +202,11 @@ def _str_keys(value: object) -> bool:
 
 
 async def request_cancel(session: AsyncConnection | AsyncSession, job_id: int) -> None:
-    """Ask a queued or running job to stop. The worker applies the cancellation."""
+    """Ask a queued or running job to stop. The worker applies the cancellation.
+
+    A queued job is cancelled without running. A running job is not interrupted:
+    if its body returns, it ends ``succeeded``; if the body raises, ``cancelled``.
+    """
 
     connection = await _connection(session)
     await connection.execute(

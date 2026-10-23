@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from akadze.args import load_arguments
 from akadze.context import bind_run, reset_run
-from akadze.exc import AkadzeError, Cancel, Fail
+from akadze.exc import AkadzeError, Cancel
 from akadze.hooks import Hooks
 from akadze.job import (
     _COLUMNS,
@@ -34,7 +34,7 @@ from akadze.job import (
     running_jobs,
 )
 from akadze.maintenance import prune, rescue
-from akadze.outcome import BackoffPolicy, decide, push_error
+from akadze.outcome import BackoffPolicy, Unstored, decide, push_error
 from akadze.periodic import schedule_due
 from akadze.schema import DB_ERRORS, is_transient_db_error, public_db_error
 
@@ -509,7 +509,7 @@ class Worker:
     async def _record_unstorable(
         self, job: Job, error: BaseException, policy: BackoffPolicy | None
     ) -> None:
-        reason = Fail(f"outcome could not be stored: {public_db_error(error)}")
+        reason = Unstored(f"outcome could not be stored: {public_db_error(error)}")
         try:
             await _finish(self.app.engine, self.app.hooks, job, reason, None, policy)
         except DB_ERRORS as again:
@@ -1012,12 +1012,6 @@ async def _apply(
     result: object,
     policy: BackoffPolicy | None = None,
 ) -> bool:
-    # A body that returned succeeded, and its side effects happened, even if a
-    # cancel or the expiry came while it ran. A body that raised meanwhile is
-    # cancelled without spending an attempt, whatever it raised.
-    if exc is not None and (job.cancel_requested_at is not None or job.expired):
-        exc = Cancel()
-        result = None
     outcome = decide(job, exc, result, policy)
     errors = push_error(list(job.errors), outcome)
     updated = await connection.execute(

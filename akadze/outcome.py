@@ -20,6 +20,12 @@ _MAX_POLICY_DELAY = timedelta(days=365)
 logger = logging.getLogger("akadze.outcome")
 
 BackoffPolicy = Callable[[int], timedelta]
+
+
+class Unstored(Fail):
+    """The body returned, but its outcome could not be stored. A cancel does not apply."""
+
+
 _MESSAGE_LIMIT = 500
 
 
@@ -40,6 +46,13 @@ def decide(
     result: object,
     policy: BackoffPolicy | None = None,
 ) -> Outcome:
+    stopped = job.cancel_requested_at is not None or job.expired
+    if stopped and not isinstance(exc, Unstored) and (exc is not None or not _is_json(result)):
+        # A cancel or the expiry came while the body ran. A body that returned
+        # a storable result keeps it (its side effects happened); one that
+        # raised, whatever it raised, or returned a result that cannot be
+        # stored, is cancelled without spending an attempt.
+        exc = Cancel()
     if isinstance(exc, Cancel):
         return _terminal(job, "cancelled", job.attempt, "Cancel", exc)
     if isinstance(exc, Snooze):
@@ -129,6 +142,14 @@ def push_error(errors: list[dict[str, str]], outcome: Outcome) -> list[dict[str,
         return errors
     entry = {"error": outcome.error_type, "message": outcome.error_message or ""}
     return [*errors, entry][-10:]
+
+
+def _is_json(result: object) -> bool:
+    try:
+        json.dumps(result)
+    except TypeError:
+        return False
+    return True
 
 
 def _terminal(job: Job, state: str, attempt: int, error_type: str, exc: BaseException) -> Outcome:

@@ -138,7 +138,7 @@ async with current().complete_tx() as connection:
     await next_step.using(session=connection).enqueue()
 ```
 
-To commit your own writes together with the transition to `succeeded`, take the connection from `current().complete_tx()`. If this run no longer owns the job, the block raises and those writes roll back. A cancel requested, or an expiry reached, while the block runs does not stop it: a block that reaches its end commits its writes and `succeeded`. An error inside the block rolls the writes back and spends an attempt.
+To commit your own writes together with the transition to `succeeded`, take the connection from `current().complete_tx()`. If this run no longer owns the job, the block raises and those writes roll back. A cancel requested, or an expiry reached, while the block runs does not stop it: a block that reaches its end commits its writes and `succeeded`. An error inside the block rolls the writes back and spends an attempt (none when a cancel was requested or the job expired meanwhile: it ends `cancelled`).
 
 ```python
 from akadze import current
@@ -215,7 +215,7 @@ Arguments are keyword-only in `enqueue(...)`. Options never go into task argumen
 | `revoke(task_id)` | `request_cancel(session, job_id)` or `akadze jobs cancel JOB_ID`; inside a task `raise Cancel()` |
 | `acks_late` + visibility timeout | lease with heartbeat; another worker requeues a lost worker's jobs and spends an attempt (on the last one the job is `failed`) |
 
-`request_cancel` does not interrupt a running task. A job whose cancel was requested, or whose `expires_at` passed, before the run is cancelled without running. During the run, the body decides: if it returns, the job ends `succeeded` with its result (its side effects happened); if it raises anything, `Retry` and `Snooze` included, the job ends `cancelled` and no attempt is spent.
+`request_cancel` does not interrupt a running task. A job whose cancel was requested, or whose `expires_at` passed, before the run is cancelled without running. During the run, the body decides: if it returns, the job ends `succeeded` with its result (its side effects happened); if it raises anything, `Retry` and `Snooze` included, or returns a result that is not JSON, the job ends `cancelled` and no attempt is spent. Once a `complete_tx` block has committed, the job is `succeeded` whatever the body does next.
 
 Delivery is at least once: a job can run again if its worker disappears, so tasks must be idempotent, as with `acks_late`. Size `max_attempts` for crashes too.
 
