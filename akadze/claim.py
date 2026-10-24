@@ -11,6 +11,7 @@ every ready row would, under the same limits and fair turns.
 
 from __future__ import annotations
 
+import heapq
 import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -78,6 +79,7 @@ class ClaimPlan:
         self._groups: dict[int, str | None] = {}
         self._places: Counter[str | None] = Counter()
         self._closed = False
+        self._last: Ready | None = None
 
     @property
     def settled(self) -> bool:
@@ -112,22 +114,28 @@ class ClaimPlan:
 
         self._policies.update(policies)
 
-    def add(self, rows: Sequence[Ready]) -> int:
-        """Read the next rows of the queue in claim order; return how many were read.
+    @property
+    def last_read(self) -> Ready | None:
+        """The last row ``add`` read."""
+
+        return self._last
+
+    def add(self, rows: Sequence[Ready]) -> None:
+        """Read the next rows of the queue in claim order.
 
         Reading stops at a priority below one that settled the plan.
         """
 
-        for read, row in enumerate(rows):
+        for row in rows:
             if self._closed:
-                return read
+                return
             if row.priority != self._tier:
                 self.end_tier()
                 if self._closed:
-                    return read
+                    return
                 self._tier = row.priority
             self._read(row)
-        return len(rows)
+            self._last = row
 
     def end_tier(self) -> None:
         """Mark every row of the current priority as read."""
@@ -187,7 +195,7 @@ class ClaimPlan:
             return float("-inf")
         if len(self._turns) < need:
             return float("inf")
-        return sorted(self._turns)[need - 1][0]
+        return heapq.nsmallest(need, self._turns)[-1][0]
 
     def _read(self, row: Ready) -> None:
         key = row.limit_key
@@ -436,11 +444,11 @@ class _Scan:
                         )
                     )
                 plan.limit_keys(await _policies(self.connection, keys=keys, locked=self.locked))
-            read = plan.add(rows)
-            if read:
-                last = rows[read - 1]
+            plan.add(rows)
+            last = plan.last_read
+            if last is not None:
                 self.cursor = _Cursor(tier=last.priority, row=last)
-            if read < len(rows):
+            if rows and last != rows[-1]:
                 return
             if len(rows) == self.size:
                 self.size *= 2
@@ -485,6 +493,7 @@ async def _take(
                 FROM akadze.jobs AS job
                 INNER JOIN planned ON planned.id = job.id
                 WHERE job.state = 'queued'
+                  AND job.run_at <= now()
                   AND job.cancel_requested_at IS NULL
                   AND (job.expires_at IS NULL OR job.expires_at > now())
                   AND NOT EXISTS (
@@ -562,9 +571,10 @@ async def claim_queue(
     """Claim up to limit ready jobs of queue in this transaction; return how many.
 
     Plans from windows of the queue (see ``ClaimPlan``), then claims the plan.
-    When other claimers hold planned rows, plans again for the slots left
-    without them; in ``fair`` mode each counts as running in its group, as it
-    will once its claimer commits. Transition hooks run once the claim is final.
+    When other claimers hold planned rows, plans again without them, for
+    twice as many rows each time, and takes the first free ones; in ``fair``
+    mode each held row counts as running in its group, as it will once its
+    claimer commits. Transition hooks run once the claim is final.
     """
 
     if limit <= 0:
@@ -574,13 +584,14 @@ async def claim_queue(
     held: list[int] = []
     held_groups: Counter[str | None] = Counter()
     size = limit * _FIRST_WINDOW_FACTOR
+    spread = 1
     while len(jobs) < limit:
         left = limit - len(jobs)
         busy: Counter[str | None] = Counter()
         if fair:
             busy.update(await _busy(connection, queue=queue))
             busy.update(held_groups)
-        plan = ClaimPlan(limit=left, fair=fair, busy=busy)
+        plan = ClaimPlan(limit=left * spread, fair=fair, busy=busy)
         scan = _Scan(
             connection,
             queue=queue,
@@ -599,13 +610,16 @@ async def claim_queue(
         if len(taken) == left:
             break
         # Every planned row was tried; the ones not taken are held by other
-        # claimers. Plan again without them, counting each as running in its group.
+        # claimers. Plan again without them, counting each as running in its
+        # group, and plan more rows than the slots left, so that many held rows
+        # take a few plans, not one per slot.
         claimed = {job.id for job in taken}
         missed = [row_id for row_id in ids if row_id not in claimed]
         if not missed:
             break
         held.extend(missed)
         held_groups.update(plan.group(row_id) for row_id in missed)
+        spread *= 2
         size *= 2
     for job in jobs:
         await hooks.ran_transition(connection, job, "queued", "running")

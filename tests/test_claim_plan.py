@@ -112,9 +112,9 @@ def test_a_window_below_the_current_priority_leaves_out_only_blocked_keys() -> N
 def test_a_higher_priority_is_planned_before_turns_of_a_lower_one() -> None:
     # Arrange
     plan = ClaimPlan(limit=3, fair=True, busy={})
+    plan.add(_rows(("a", 5), ("a", 5), ("b", 0), ("c", 0)))
 
     # Act
-    plan.add(_rows(("a", 5), ("a", 5), ("b", 0), ("c", 0)))
     plan.end_tier()
 
     # Assert
@@ -126,10 +126,10 @@ def test_reading_stops_below_a_priority_that_filled_the_plan() -> None:
     plan = ClaimPlan(limit=2, fair=True, busy={})
 
     # Act
-    read = plan.add(_rows(("a", 5), ("a", 5), ("b", 0)))
+    plan.add(_rows(("a", 5), ("a", 5), ("b", 0)))
 
     # Assert
-    assert (read, plan.settled, plan.ids()) == (2, True, [1, 2])
+    assert (plan.last_read and plan.last_read.id, plan.settled, plan.ids()) == (2, True, [1, 2])
 
 
 def test_fair_stand_ins_are_only_rows_no_unread_row_can_beat() -> None:

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from akadze import Akadze
-from akadze.claim import _take
+from akadze.claim import Policy, _policies, _take
 from akadze.job import Job
 from akadze.worker import Worker
 from tests.factories import apply_limit
@@ -121,3 +121,17 @@ async def test_claim_leaves_a_limited_key_it_did_not_lock_for_the_next_claim(
 
     # Assert
     assert [job.task for job in jobs] == ["free"]
+
+
+async def test_a_limited_key_this_claim_did_not_lock_has_no_starts_left(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    await apply_limit(app.engine, key="vendor", max_running=5)
+
+    # Act
+    async with app.engine.begin() as session:
+        policies = await _policies(session, keys=["vendor", "free"], locked=set())
+
+    # Assert
+    assert policies == {"vendor": Policy(left=0), "free": None}
