@@ -125,9 +125,10 @@ class Worker:
     every ``heartbeat_interval``; a worker whose heartbeat is older than
     ``heartbeat_ttl`` is presumed dead: another worker requeues its jobs,
     spending an attempt with the default backoff (``failed`` on the last one).
-    An idle worker polls about every ``poll_interval``. On stop it waits up to
-    ``shutdown_timeout`` for running jobs, then returns the rest to the queue
-    without spending an attempt. ``fair=True`` shares slots across
+    An idle worker polls about every ``poll_interval``; a worker whose slots
+    are all taken claims again as soon as one of those runs ends. On stop it
+    waits up to ``shutdown_timeout`` for running jobs, then returns the rest to
+    the queue without spending an attempt. ``fair=True`` shares slots across
     ``limit_key`` groups within a priority instead of taking the oldest jobs.
 
     ``akadze worker module:app`` builds one and calls ``serve``.
@@ -165,6 +166,11 @@ class Worker:
         self._fatal: BaseException | None = None
         self._draining = False
         self._last_claim_full = False
+        # Set when a run of a queue with every slot taken writes its outcome. The
+        # pause waits on it, not on the poll interval, so the slot is refilled at
+        # once. Made per claim, so it belongs to the running loop.
+        self._slot_freed: asyncio.Event | None = None
+        self._taken: frozenset[str] = frozenset()
 
     async def register(self) -> None:
         async with self.app.engine.begin() as connection:
@@ -223,7 +229,9 @@ class Worker:
         """
 
         full = False
+        taken: set[str] = set()
         self._last_claim_full = False
+        self._slot_freed = asyncio.Event()
         tasks = list(self.app.tasks)
         for queue in self.queues:
             async with self.app.engine.begin() as connection:
@@ -241,7 +249,10 @@ class Worker:
                 )
                 if limit > 0 and claimed == limit:
                     full = True
+                if limit <= 0:
+                    taken.add(queue)
         self._last_claim_full = full
+        self._taken = frozenset(taken)
 
     @property
     def running(self) -> tuple[asyncio.Task[None], ...]:
@@ -365,7 +376,20 @@ class Worker:
             await self._pause(stop)
 
     async def _pause(self, stop: asyncio.Event) -> None:
-        await self._wait(stop, poll_delay(self.poll_interval.total_seconds(), random.random()))
+        delay = poll_delay(self.poll_interval.total_seconds(), random.random())
+        if not self._taken or self._slot_freed is None:
+            await self._wait(stop, delay)
+            return
+        # Every slot of some queue was taken, so it may hold more: claim again
+        # once one of its runs ends instead of sleeping the whole interval. If
+        # that claim finds the queue empty, the next pause polls as usual.
+        freed = asyncio.ensure_future(self._slot_freed.wait())
+        stopped = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({freed, stopped}, timeout=delay, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            freed.cancel()
+            stopped.cancel()
 
     def _stale(self) -> bool:
         return self._heartbeat_left() <= 0
@@ -469,16 +493,28 @@ class Worker:
             except Exception as exc:
                 if _run.done:
                     logger.info("job %s raised after complete_tx", job.id)
+                    self._freed(job)
                     return
                 await self._record(job, exc, None, policy)
             else:
                 if _run.done:
+                    self._freed(job)
                     return
                 await self._record(job, None, result, policy)
         finally:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
+
+    def _freed(self, job: Job) -> None:
+        """Wake the pause: this run's outcome is written, so its slot is free.
+
+        Only then: a run that left its row running (lost, stale) is not a free
+        slot, and waking for it would restart it at once.
+        """
+
+        if self._slot_freed is not None and job.queue in self._taken:
+            self._slot_freed.set()
 
     async def _record(
         self,
@@ -500,6 +536,7 @@ class Worker:
         while True:
             try:
                 await _finish(self.app.engine, self.app.hooks, job, exc, result, policy)
+                self._freed(job)
                 return
             except DB_ERRORS as error:
                 if not is_transient_db_error(error):
@@ -544,6 +581,7 @@ class Worker:
                 public_db_error(again),
             )
         else:
+            self._freed(job)
             logger.warning("job %s outcome could not be stored: %s", job.id, public_db_error(error))
 
     async def _invoke(self, job: Job) -> object:

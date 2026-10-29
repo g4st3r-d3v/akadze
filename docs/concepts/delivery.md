@@ -27,7 +27,7 @@ Every claim increments the row's `run_count`. A worker writes an outcome only wh
 
 Each loop the worker heartbeats, rescues jobs of dead workers, prunes old rows (about once a minute), enqueues due schedule fires and claims up to its free slots per queue.
 
-A claim that fills every free slot is followed by another claim immediately. Otherwise the worker waits up to `poll_interval` (1 second), at least half of it, with jitter so idle workers do not poll in step.
+A claim that fills every free slot is followed by another claim immediately. When every slot of a queue is taken, the worker claims again as soon as one of those runs ends, without waiting for the poll. Otherwise the worker waits up to `poll_interval` (1 second), at least half of it, with jitter so idle workers do not poll in step.
 
 | `Worker(...)` option | Default |
 |---|---|
