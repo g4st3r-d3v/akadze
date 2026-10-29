@@ -32,6 +32,7 @@ async def hello(name: str) -> str:
 async def main() -> None:
     async with app.engine.begin() as connection:
         await hello.using(session=connection).enqueue(name="ada")
+    await app.aclose()
 
 
 if __name__ == "__main__":

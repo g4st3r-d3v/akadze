@@ -6,12 +6,13 @@
 
 | Outcome of a run | Attempt spent | Next |
 |---|---|---|
-| returns | — | `succeeded` |
+| returns a JSON-serializable value (or nothing) | — | `succeeded` |
+| returns a value that is not JSON (`datetime`, a model) | yes | retried after backoff (`ResultNotJson`) |
 | raises any exception | yes | retried after backoff |
 | exceeds `timeout` | yes | retried after backoff |
 | `raise Retry(delay)` | yes | retried after `delay` |
 | `raise Snooze(delay)` | no | runs again after `delay` |
-| `raise Fail("reason")` | — | `failed` now |
+| `raise Fail("reason")` | yes | `failed` now |
 | `raise Cancel()` | — | `cancelled` now |
 | worker lost, rescued by another | yes | retried after backoff |
 | graceful worker shutdown | no | back to `queued` |
@@ -33,7 +34,7 @@ async def poll(export_id: str) -> None:
 
 ## Backoff
 
-The default delay is `2^(attempt-1)` seconds, capped at 300, with jitter in `[50 %, 100 %]`, so a batch that failed together does not hit a vendor again in one wave. Jobs rescued from a lost worker get the same curve.
+The default delay is `2^(attempt-1)` seconds, capped at 300, with jitter in `[50 %, 100 %]`, so a batch that failed together does not hit a vendor again in one wave. Jobs rescued from a lost worker always get this default curve, even when the task has its own policy.
 
 Set your own per task:
 
@@ -42,7 +43,7 @@ Set your own per task:
 async def sync() -> None: ...
 ```
 
-The policy must be a cheap, plain (not async) function: it runs on the worker's event loop. A policy that raises or returns something other than a `timedelta` falls back to the default. Delays are clamped to `[0, 365 days]`. `Retry(delay)` wins over any policy. Annotate policies with `akadze.BackoffPolicy`.
+The policy must be a cheap, plain (not async) function: it runs on the worker's event loop. A policy that raises or returns something other than a `timedelta` falls back to the default. Policy delays are clamped to `[0, 365 days]`. `Retry(delay)` wins over any policy and is not clamped. Annotate policies with `akadze.BackoffPolicy`.
 
 ## Cancel
 
@@ -59,7 +60,7 @@ akadze jobs cancel JOB_ID
 `request_cancel` marks a `queued` or `running` job; other states and missing ids are a no-op. The CLI exits 1 with `job is not active` in that case.
 
 - A job cancelled, or past its `expires_at`, before it starts is `cancelled` without running.
-- A running task is not interrupted. When the body returns, the job is `succeeded` with its result: its side effects happened. When it raises anything (`Retry` and `Snooze` included) or returns a non-JSON result, it ends `cancelled` and no attempt is spent.
+- A running task is not interrupted. Since 0.6.0 (on PyPI: 0.5.0 still ends such a job `cancelled`): When the body returns, the job is `succeeded` with its result: its side effects happened. When it raises anything (`Retry` and `Snooze` included) or returns a non-JSON result, it ends `cancelled` and no attempt is spent.
 
 ## Requeue a failed job
 

@@ -21,8 +21,8 @@ stateDiagram-v2
 |---|---|
 | `queued` | waiting; ready once `run_at` has passed |
 | `running` | claimed by a worker that holds the lease |
-| `succeeded` | the body returned; `result` holds its JSON value |
-| `failed` | out of attempts, or `Fail`; `errors` holds one entry per failed attempt |
+| `succeeded` | the body returned a JSON value (or nothing); `result` holds it |
+| `failed` | out of attempts, or `Fail`; `errors` holds the latest failures (the last 10 run errors, plus lost-worker entries) |
 | `cancelled` | cancelled before or during a run |
 
 Finished rows are deleted after the app's `retention` (default 7 days).

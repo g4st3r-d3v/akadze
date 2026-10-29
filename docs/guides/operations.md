@@ -12,7 +12,7 @@
 
 ### Rolling deploys
 
-A worker claims only jobs whose task is registered on its app. A job of a task that only the new code defines stays `queued`, without spending an attempt, until a new worker takes it. Workers on akadze 0.5.0 and older still claim it and spend attempts, so upgrade akadze before adding tasks.
+Since 0.6.0, a worker claims only jobs whose task is registered on its app. A job of a task that only the new code defines stays `queued`, without spending an attempt, until a new worker takes it. Workers on akadze 0.5.0 and older still claim it and spend attempts, so upgrade akadze before adding tasks.
 
 A job whose task no worker registers (removed or renamed) stays queued with no error, keeps its `unique_key` taken and counts in queue lag. Cancel such jobs when you remove a task.
 
@@ -48,7 +48,7 @@ Count outcomes per task in an `on_transition` [hook](tasks.md#hooks). Do not put
 
 ## Retention
 
-The worker deletes finished jobs (`succeeded`, `failed`, `cancelled`) and periodic runs older than the app's `retention` (default 7 days), in batches, about once a minute. Set it with `Akadze(retention=timedelta(days=30))`.
+The worker deletes finished jobs (`succeeded`, `failed`, `cancelled`) and periodic runs older than the app's `retention` (default 7 days), about once a minute: each worker deletes at most 1 000 finished jobs per pass. A cluster that finishes more than about 1 000 jobs a minute per worker outgrows this; delete old rows yourself (`DELETE FROM akadze.jobs WHERE state IN ('succeeded','failed','cancelled') AND finished_at < …` in batches). Set it with `Akadze(retention=timedelta(days=30))`.
 
 ## Worker and database errors
 

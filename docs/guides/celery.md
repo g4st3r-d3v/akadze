@@ -82,7 +82,7 @@ async def build(report_id: int) -> None:
 
 ## 7. Operating it
 
-Flower's screens map to CLI and queries: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID`, and `akadze metrics` for a Prometheus sidecar. Signals: `task_prerun` → `app.hooks.before_run`; `task_success` → `app.hooks.after_run`, which runs only when the task returns and inside its timeout (an error there fails the run); `task_postrun`, `task_failure` and `task_retry` → `app.hooks.on_transition`, which sees every state change in the transaction that makes it.
+Flower's screens map to CLI and queries: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID`, and `akadze metrics` for a Prometheus sidecar. Signals: `task_prerun` → `app.hooks.before_run`; `task_success` → `app.hooks.after_run`, which runs only when the task returns and inside its timeout (an error there spends an attempt and the body runs again on retry); `task_postrun`, `task_failure` and `task_retry` → `app.hooks.on_transition`, which sees every state change in the transaction that makes it.
 
 ## What is not there, and why
 

@@ -45,6 +45,9 @@ On Ctrl-C or SIGTERM the worker takes no new jobs and waits up to `shutdown_time
 
 ## Database errors
 
+!!! note
+    This section describes 0.6.0. In 0.5.0 a database error stops the worker.
+
 A transient error (connection loss, server restart or failover, too many connections, a deadlock, a serialization failure) is logged and retried with backoff. The worker keeps running and does not claim while its heartbeat fails. Other database errors, such as a schema that was not migrated, stop it.
 
 If no heartbeat succeeds for `heartbeat_ttl`, the worker stops and puts its unfinished jobs back without spending an attempt. If the database is still unreachable, another worker rescues them once their heartbeat expires, which spends an attempt like any lost run. `akadze worker` then exits with code 1.

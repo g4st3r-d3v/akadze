@@ -33,7 +33,7 @@ async def send_mail(user_id: int) -> None:
 | `priority` | 0 | Higher is claimed first; overridable per job |
 | `backoff` | jittered exponential | A function `attempt -> timedelta`, see [Retries](retries.md#backoff) |
 
-Arguments are validated by a model built from the signature and stored as JSON. Values come back with their types: nested pydantic models, dataclasses, `datetime`, `UUID` and `Decimal` arrive in the task as those types.
+Arguments are validated by a model built from the signature and stored as JSON. Since 0.6.0, values come back with their types: nested pydantic models, dataclasses, `datetime`, `UUID` and `Decimal` arrive in the task as those types.
 
 A synchronous function also works: it runs in a thread.
 
@@ -88,7 +88,7 @@ There is no global app and no `shared_task`.
 |---|---|---|
 | `on_enqueue` | `(connection, job)` | in the enqueue transaction, once per job |
 | `before_run` | `(job)` | before the task body |
-| `after_run` | `(job)` | after the body returns, inside its timeout; an error here fails the run |
+| `after_run` | `(job)` | after the body returns, inside its timeout; an error here counts as a failed run: an attempt is spent and the whole body runs again on retry |
 | `on_transition` | `(connection, job, from_state, to_state)` | in the transaction that changes the state |
 
 ```python
