@@ -64,7 +64,7 @@ Run the worker from the directory that contains `demo.py`. It loads `demo:app` f
 
 A transient database error in the worker (a restart, a failover, a dropped connection, a deadlock) is logged and retried with backoff; the worker keeps running and does not claim while its heartbeat fails. Other database errors, such as a schema that was not migrated, stop it. If a heartbeat does not succeed within 30 seconds (`heartbeat_ttl`), the worker stops and puts unfinished jobs back on the queue; an attempt is not spent. If the database is still unreachable, another worker rescues them once their heartbeat expires; a rescue spends an attempt, like any lost run. `akadze worker` then exits with code 1. A synchronous task runs in a thread. Stopping the worker does not stop that thread.
 
-A claim that fills every free slot is followed by another claim immediately. Otherwise the worker waits up to `poll_interval` (1 second). The wait is at least half of that, so idle workers do not poll in step or spin. A job can run more than once if its worker disappears.
+A claim that fills every free slot is followed by another claim immediately. When every slot of a queue is taken, the worker claims again as soon as one of those runs ends. Otherwise the worker waits up to `poll_interval` (1 second). The wait is at least half of that, so idle workers do not poll in step or spin. A job can run more than once if its worker disappears.
 
 ```bash
 python demo.py
