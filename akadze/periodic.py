@@ -13,12 +13,13 @@ from sqlalchemy import text
 
 from akadze.args import dump_arguments
 from akadze.enqueue import insert_job
-from akadze.exc import AkadzeError, DuplicateJob
+from akadze.exc import AkadzeError, DuplicateJob, EnqueueError
+from akadze.schema import DB_ERRORS
 
 logger = logging.getLogger("akadze.periodic")
 
-# Names already reported as unreadable, so a broken schedule logs once per process.
-_UNREADABLE: set[str] = set()
+# Schedules already reported as broken, so one logs once until it works again.
+_BROKEN: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,7 @@ class ScheduleSpec:
     timezone: str | None = None
 
 
-def check_schedule(cron: str | None, every: timedelta | None, timezone: object) -> None:
+def check_schedule(cron: object, every: timedelta | None, timezone: object) -> None:
     """Validate schedule options shared by ``@periodic`` and ``add_schedule``."""
 
     if (cron is None) == (every is None):
@@ -80,15 +81,17 @@ _ALIASES = {
 
 
 def cron_fields(cron: str | None) -> str | None:
-    """Return the cron as space-separated fields, with an alias such as ``@hourly`` expanded.
+    """Return a str cron as single-spaced fields, an alias such as ``@hourly`` expanded.
 
-    The DST rules read the hour field, so a schedule keeps its fields, not an alias.
+    Callers store this and pass it to ``check_schedule``. The DST rules read
+    the hour field, so a schedule keeps fields, not an alias. Anything else is
+    returned as is for ``check_schedule`` to reject.
     """
 
-    if cron is None or not isinstance(cron, str):
+    if not isinstance(cron, str):  # values from config arrive untyped
         return cron
-    stripped = " ".join(cron.split())
-    return _ALIASES.get(stripped.lower(), stripped)
+    fields = " ".join(cron.split())
+    return _ALIASES.get(fields.lower(), fields)
 
 
 def _check_cron(cron: object) -> None:
@@ -96,15 +99,25 @@ def _check_cron(cron: object) -> None:
 
     if not isinstance(cron, str):
         raise AkadzeError("cron must be a str")
-    fields = cron_fields(cron) or ""
-    if not croniter.is_valid(fields):
+    if not croniter.is_valid(cron):
         raise AkadzeError(f"cron {cron!r} is not a valid expression")
+    if len(cron.split()) != 5:
+        # A sixth field is seconds and a seventh a year: valid for croniter, unlike cron.
+        logger.warning("cron %r has more than five fields (seconds, year)", cron)
+        return
     try:
-        croniter(fields, datetime.now(UTC)).get_next(datetime)
+        croniter(cron, datetime.now(UTC)).get_next(datetime)
     except CroniterError:
         raise AkadzeError(f"cron {cron!r} never fires") from None
-    if len(fields.split()) == 6:
-        logger.warning("cron %r has six fields; the sixth is read as seconds", cron)
+
+
+def check_schedule_task(task: Any) -> None:
+    """Reject a schedule whose task cannot be enqueued without arguments."""
+
+    try:
+        dump_arguments(task.arguments, {}, task=task.name)
+    except EnqueueError as exc:
+        raise AkadzeError(f"schedule {task.name}: the task needs arguments ({exc})") from None
 
 
 def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:
@@ -189,11 +202,15 @@ async def schedule_due(app: Any) -> None:
             await _schedule_one(app, schedule)
         except DuplicateJob:
             continue
-        except CroniterError as exc:
-            # One unreadable schedule must not stop the worker and every other schedule.
-            if schedule.name not in _UNREADABLE:
-                _UNREADABLE.add(schedule.name)
+        except DB_ERRORS:
+            raise
+        except Exception as exc:
+            # One broken schedule must not stop the worker and every other schedule.
+            if id(schedule) not in _BROKEN:
+                _BROKEN.add(id(schedule))
                 logger.error("schedule %s skipped: %s", schedule.name, exc)
+        else:
+            _BROKEN.discard(id(schedule))
 
 
 async def _schedule_one(app: Any, schedule: Schedule) -> None:

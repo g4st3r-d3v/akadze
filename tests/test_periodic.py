@@ -106,3 +106,23 @@ async def test_an_unreadable_schedule_does_not_stop_the_others(
     # Assert
     rows = await job_rows(database_url)
     assert [row["task"] for row in rows] == ["tick"]
+
+
+async def test_a_broken_schedule_is_reported_once_while_it_stays_broken(
+    app: Akadze, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange
+    @app.task("broken")
+    async def broken() -> None:
+        return None
+
+    app.schedules.append(
+        Schedule(name="broken", cron="0 0 31 2 *", every=None, overlap=True, queue="default")
+    )
+    await schedule_due(app)
+
+    # Act
+    await schedule_due(app)
+
+    # Assert
+    assert caplog.text.count("schedule broken skipped") == 1

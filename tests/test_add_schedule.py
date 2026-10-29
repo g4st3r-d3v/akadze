@@ -126,18 +126,45 @@ async def test_add_schedule_keeps_the_cron_as_five_fields(
     assert app.schedules[0].cron == fields
 
 
-async def test_periodic_warns_about_a_cron_with_seconds(
-    app: Akadze, caplog: pytest.LogCaptureFixture
+async def test_add_schedule_rejects_a_task_that_needs_arguments(app: Akadze) -> None:
+    # Arrange — a fire enqueues the task with no arguments
+    @app.task("report")
+    async def report(day: str) -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="schedule report: the task needs arguments"):
+        app.add_schedule("report", every=timedelta(minutes=1))
+    assert app.schedules == []
+
+
+async def test_periodic_rejects_a_task_that_needs_arguments(app: Akadze) -> None:
+    # Arrange — nothing registered yet
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="the task needs arguments"):
+
+        @app.periodic("report", every=timedelta(minutes=1))
+        async def report(day: str) -> None:
+            return None
+
+    assert "report" not in app.tasks
+
+
+@pytest.mark.parametrize("cron", ["0 0 * * * *", "0 0 1 1 * 0 2020"])
+async def test_periodic_warns_about_a_cron_with_extra_fields(
+    app: Akadze, caplog: pytest.LogCaptureFixture, cron: str
 ) -> None:
-    # Arrange — six fields: croniter reads the last one as seconds
+    # Arrange — croniter reads a sixth field as seconds and a seventh as a year
 
     # Act
-    @app.periodic("tick", cron="0 0 * * * *")
+    @app.periodic("tick", cron=cron)
     async def tick() -> None:
         return None
 
     # Assert
-    assert "six fields" in caplog.text
+    assert "more than five fields" in caplog.text
+    assert app.schedules[0].cron == cron
 
 
 async def test_add_schedules_from_dicts_and_specs(app: Akadze) -> None:
