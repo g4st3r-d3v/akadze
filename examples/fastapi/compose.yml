@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    healthcheck:
+      # Over TCP: the socket answers while initdb still runs its temporary server.
+      test: ["CMD-SHELL", "pg_isready -h localhost -U app -d app"]
+      interval: 2s
+      retries: 15
+
+  # Deploy step: akadze migrate and the app's table, then it exits.
+  setup:
+    build: .
+    image: akadze-fastapi-example
+    restart: on-failure
+    environment: &env
+      AKADZE_DATABASE_URL: postgresql://app:app@postgres:5432/app
+    command: python setup_db.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: akadze-fastapi-example
+    environment: *env
+    command: uvicorn main:api --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+  worker:
+    image: akadze-fastapi-example
+    environment: *env
+    command: akadze worker main:app --queue default --queue mail --slots 4
+    depends_on:
+      setup:
+        condition: service_completed_successfully

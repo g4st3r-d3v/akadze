@@ -69,6 +69,7 @@ plugins:
           nav_translations:
             Home: Главная
             First task: Первая задача
+            Examples: Примеры
             Guides: Руководства
             Tasks and the app: Задачи и приложение
             Enqueue: Постановка в очередь
@@ -102,6 +103,7 @@ plugins:
 nav:
   - Home: index.md
   - First task: first-task.md
+  - Examples: examples.md
   - Guides:
       - Tasks and the app: guides/tasks.md
       - Enqueue: guides/enqueue.md

@@ -38,7 +38,7 @@ jobs:
           python-version: "3.13"
       - run: pipx install poetry==2.5.1
       - run: poetry install
-      - run: poetry run ruff check akadze tests .github/scripts
+      - run: poetry run ruff check akadze tests .github/scripts examples
       - run: poetry run mypy
       - run: poetry run pytest
       - run: poetry build
@@ -54,3 +54,32 @@ jobs:
           assert any(name.endswith("akadze/sql/001_initial.sql") for name in names), names
           assert any(name.endswith("akadze/py.typed") for name in names), names
           PY
+
+  examples:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: akadze
+          POSTGRES_PASSWORD: akadze
+          POSTGRES_DB: example_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U akadze -d example_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AKADZE_DATABASE_URL: postgresql://akadze:akadze@localhost:5432/example_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The package from this checkout, so an example breaks in the PR that breaks it.
+      - run: pip install ../.. -r requirements-test.txt $(grep -v '^akadze' requirements.txt)
+        working-directory: examples/fastapi
+      - run: pytest
+        working-directory: examples/fastapi

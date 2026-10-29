@@ -8,6 +8,8 @@ Shape is familiar if you know Celery. The broker is PostgreSQL (`FOR UPDATE SKIP
 
 **Documentation:** <https://g4st3r-d3v.github.io/akadze/>
 
+**Example:** [`examples/fastapi`](https://github.com/g4st3r-d3v/akadze/tree/main/examples/fastapi) — FastAPI service, worker and Postgres in one `docker compose up`.
+
 **Status:** alpha (0.x). Public API may still change between minors until 1.0; after Beta the surface freezes. Bugs → [Issues](https://github.com/g4st3r-d3v/akadze/issues).
 
 ## Goals
