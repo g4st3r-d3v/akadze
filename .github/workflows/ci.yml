@@ -38,7 +38,7 @@ jobs:
           python-version: "3.13"
       - run: pipx install poetry==2.5.1
       - run: poetry install
-      - run: poetry run ruff check akadze tests
+      - run: poetry run ruff check akadze tests .github/scripts
       - run: poetry run mypy
       - run: poetry run pytest
       - run: poetry build

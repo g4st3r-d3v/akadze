@@ -16,7 +16,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # Separate from build, so a stale translation fails the PR but does not hold up a deploy.
+  parity:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +26,14 @@ jobs:
           python-version: "3.13"
       - name: Russian pages match the English structure
         run: python .github/scripts/docs_parity.py
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - run: pip install -r docs/requirements.txt
       - run: mkdocs build --strict
         env:
