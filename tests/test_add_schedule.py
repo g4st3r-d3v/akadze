@@ -84,6 +84,89 @@ async def test_add_schedule_rejects_both_cron_and_every(app: Akadze) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("cron", "match"),
+    [
+        ("not a cron", "is not a valid expression"),
+        ("61 * * * *", "is not a valid expression"),
+        ("0 0 31 2 *", "never fires"),
+        (5, "cron must be a str"),
+    ],
+)
+async def test_add_schedule_rejects_a_cron_the_scheduler_cannot_read(
+    app: Akadze, cron: str, match: str
+) -> None:
+    # Arrange
+    @app.task("tick")
+    async def tick() -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match=match):
+        app.add_schedule("tick", cron=cron)
+    assert app.schedules == []
+
+
+@pytest.mark.parametrize(
+    ("cron", "fields"),
+    [("@hourly", "0 * * * *"), (" @Daily ", "0 0 * * *"), ("0  9 * * *", "0 9 * * *")],
+)
+async def test_add_schedule_keeps_the_cron_as_five_fields(
+    app: Akadze, cron: str, fields: str
+) -> None:
+    # Arrange
+    @app.task("tick")
+    async def tick() -> None:
+        return None
+
+    # Act
+    app.add_schedule("tick", cron=cron)
+
+    # Assert
+    assert app.schedules[0].cron == fields
+
+
+async def test_add_schedule_rejects_a_task_that_needs_arguments(app: Akadze) -> None:
+    # Arrange — a fire enqueues the task with no arguments
+    @app.task("report")
+    async def report(day: str) -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="schedule report: the task needs arguments"):
+        app.add_schedule("report", every=timedelta(minutes=1))
+    assert app.schedules == []
+
+
+async def test_periodic_rejects_a_task_that_needs_arguments(app: Akadze) -> None:
+    # Arrange — nothing registered yet
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="the task needs arguments"):
+
+        @app.periodic("report", every=timedelta(minutes=1))
+        async def report(day: str) -> None:
+            return None
+
+    assert "report" not in app.tasks
+
+
+@pytest.mark.parametrize("cron", ["0 0 * * * *", "0 0 1 1 * 0 2020"])
+async def test_periodic_warns_about_a_cron_with_extra_fields(
+    app: Akadze, caplog: pytest.LogCaptureFixture, cron: str
+) -> None:
+    # Arrange — croniter reads a sixth field as seconds and a seventh as a year
+
+    # Act
+    @app.periodic("tick", cron=cron)
+    async def tick() -> None:
+        return None
+
+    # Assert
+    assert "more than five fields" in caplog.text
+    assert app.schedules[0].cron == cron
+
+
 async def test_add_schedules_from_dicts_and_specs(app: Akadze) -> None:
     # Arrange
     @app.task("a")

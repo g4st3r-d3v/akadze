@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from akadze.args import argument_model, dump_arguments
 from akadze.enqueue import check_options, insert_job, insert_jobs
-from akadze.exc import AkadzeError, EnqueueError
+from akadze.exc import EnqueueError
 from akadze.outcome import BackoffPolicy
 
 P = ParamSpec("P")
@@ -121,13 +121,13 @@ class BoundTask(Generic[P]):
     async def enqueue(self, *args: P.args, **kwargs: P.kwargs) -> None:
         """Insert one job with these arguments (by name). Returns nothing.
 
-        Raises ``AkadzeError`` for positional arguments, ``EnqueueError`` on
-        invalid arguments or options and ``DuplicateJob`` when ``unique_key``
-        is taken; none of them inserts a row.
+        Raises ``EnqueueError`` on positional or invalid arguments and invalid
+        options, and ``DuplicateJob`` when ``unique_key`` is taken; neither
+        inserts a row.
         ``DuplicateJob`` does not abort the caller's transaction.
         """
         if args:
-            raise AkadzeError(f"pass arguments to {self._task.name} by name")
+            raise EnqueueError(f"pass arguments to {self._task.name} by name")
         payload = dump_arguments(self._task.arguments, kwargs, task=self._task.name)
         await insert_job(
             self._session,

@@ -63,6 +63,19 @@ async def test_enqueue_rejects_a_bad_argument(app: Akadze, database_url: str) ->
     assert await job_rows(database_url) == []
 
 
+async def test_enqueue_rejects_positional_arguments(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo(item: int) -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(EnqueueError, match="pass arguments to demo by name"):
+        async with app.engine.begin() as session:
+            await demo.using(session=session).enqueue(1)  # type: ignore[call-arg]
+    assert await job_rows(database_url) == []
+
+
 async def test_enqueue_options_are_not_task_arguments(app: Akadze, database_url: str) -> None:
     # Arrange
     @app.task("demo")

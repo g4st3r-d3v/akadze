@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from akadze import Akadze
-from akadze.periodic import schedule_due
+from akadze.periodic import Schedule, schedule_due
 from tests.pg import connection, job_rows
 
 
@@ -81,3 +81,48 @@ async def test_overlap_false_enqueues_the_held_fire_once_the_previous_job_finish
     async with connection(database_url) as opened:
         fires = await opened.fetch("SELECT fire_at FROM akadze.periodic_runs ORDER BY fire_at")
     assert [row["fire_at"] for row in fires] == [first, held]
+
+
+async def test_an_unreadable_schedule_does_not_stop_the_others(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange — a schedule that got past validation (built directly) and never fires
+    @app.task("broken")
+    async def broken() -> None:
+        return None
+
+    @app.periodic("tick", cron="* * * * *")
+    async def tick() -> None:
+        return None
+
+    app.schedules.insert(
+        0,
+        Schedule(name="broken", cron="0 0 31 2 *", every=None, overlap=True, queue="default"),
+    )
+
+    # Act
+    await schedule_due(app)
+
+    # Assert
+    rows = await job_rows(database_url)
+    assert [row["task"] for row in rows] == ["tick"]
+
+
+async def test_a_broken_schedule_is_reported_once_while_it_stays_broken(
+    app: Akadze, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange
+    @app.task("broken")
+    async def broken() -> None:
+        return None
+
+    app.schedules.append(
+        Schedule(name="broken", cron="0 0 31 2 *", every=None, overlap=True, queue="default")
+    )
+    await schedule_due(app)
+
+    # Act
+    await schedule_due(app)
+
+    # Assert
+    assert caplog.text.count("schedule broken skipped") == 1

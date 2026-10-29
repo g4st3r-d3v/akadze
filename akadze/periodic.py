@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from croniter import croniter  # type: ignore[import-untyped]
+from croniter import CroniterError, croniter  # type: ignore[import-untyped]
 from sqlalchemy import text
 
 from akadze.args import dump_arguments
 from akadze.enqueue import insert_job
-from akadze.exc import AkadzeError, DuplicateJob
+from akadze.exc import AkadzeError, DuplicateJob, EnqueueError
+from akadze.schema import DB_ERRORS
+
+logger = logging.getLogger("akadze.periodic")
+
+# Schedules already reported as broken, so one logs once until it works again.
+_BROKEN: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -41,13 +48,15 @@ class ScheduleSpec:
     timezone: str | None = None
 
 
-def check_schedule(cron: str | None, every: timedelta | None, timezone: object) -> None:
+def check_schedule(cron: object, every: timedelta | None, timezone: object) -> None:
     """Validate schedule options shared by ``@periodic`` and ``add_schedule``."""
 
     if (cron is None) == (every is None):
         raise AkadzeError("schedule needs cron or every")
     if every is not None and every <= timedelta(0):
         raise AkadzeError("every must be positive")
+    if cron is not None:
+        _check_cron(cron)
     if timezone is None:
         return
     if not isinstance(timezone, str):
@@ -58,6 +67,57 @@ def check_schedule(cron: str | None, every: timedelta | None, timezone: object) 
         ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError):
         raise AkadzeError(f"unknown timezone {timezone!r}") from None
+
+
+_ALIASES = {
+    "@yearly": "0 0 1 1 *",
+    "@annually": "0 0 1 1 *",
+    "@monthly": "0 0 1 * *",
+    "@weekly": "0 0 * * 0",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly": "0 * * * *",
+}
+
+
+def cron_fields(cron: str | None) -> str | None:
+    """Return a str cron as single-spaced fields, an alias such as ``@hourly`` expanded.
+
+    Callers store this and pass it to ``check_schedule``. The DST rules read
+    the hour field, so a schedule keeps fields, not an alias. Anything else is
+    returned as is for ``check_schedule`` to reject.
+    """
+
+    if not isinstance(cron, str):  # values from config arrive untyped
+        return cron
+    fields = " ".join(cron.split())
+    return _ALIASES.get(fields.lower(), fields)
+
+
+def _check_cron(cron: object) -> None:
+    """Reject a cron the scheduler tick could not read, before a worker runs it."""
+
+    if not isinstance(cron, str):
+        raise AkadzeError("cron must be a str")
+    if not croniter.is_valid(cron):
+        raise AkadzeError(f"cron {cron!r} is not a valid expression")
+    if len(cron.split()) != 5:
+        # A sixth field is seconds and a seventh a year: valid for croniter, unlike cron.
+        logger.warning("cron %r has more than five fields (seconds, year)", cron)
+        return
+    try:
+        croniter(cron, datetime.now(UTC)).get_next(datetime)
+    except CroniterError:
+        raise AkadzeError(f"cron {cron!r} never fires") from None
+
+
+def check_schedule_task(task: Any) -> None:
+    """Reject a schedule whose task cannot be enqueued without arguments."""
+
+    try:
+        dump_arguments(task.arguments, {}, task=task.name)
+    except EnqueueError as exc:
+        raise AkadzeError(f"schedule {task.name}: the task needs arguments ({exc})") from None
 
 
 def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:
@@ -142,6 +202,15 @@ async def schedule_due(app: Any) -> None:
             await _schedule_one(app, schedule)
         except DuplicateJob:
             continue
+        except DB_ERRORS:
+            raise
+        except Exception as exc:
+            # One broken schedule must not stop the worker and every other schedule.
+            if id(schedule) not in _BROKEN:
+                _BROKEN.add(id(schedule))
+                logger.error("schedule %s skipped: %s", schedule.name, exc)
+        else:
+            _BROKEN.discard(id(schedule))
 
 
 async def _schedule_one(app: Any, schedule: Schedule) -> None:

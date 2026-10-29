@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from akadze.exc import AkadzeError
 from akadze.hooks import Hooks
 from akadze.outcome import BackoffPolicy
-from akadze.periodic import Schedule, ScheduleSpec, check_schedule
+from akadze.periodic import (
+    Schedule,
+    ScheduleSpec,
+    check_schedule,
+    check_schedule_task,
+    cron_fields,
+)
 from akadze.schema import async_database_url
 from akadze.task import Task
 
@@ -188,7 +194,8 @@ class Akadze:
         ``timeout`` and ``backoff`` are those of ``task``; periodic jobs have
         priority 0.
         """
-        check_schedule(cron, every, timezone)
+        fields = cron_fields(cron)
+        check_schedule(fields, every, timezone)
 
         def decorate(fn: Callable[..., Any]) -> Task[Any]:
             registered = self.task(
@@ -198,10 +205,15 @@ class Akadze:
                 timeout=timeout,
                 backoff=backoff,
             )(fn)
+            try:
+                check_schedule_task(registered)
+            except AkadzeError:
+                del self.tasks[name]
+                raise
             self.schedules.append(
                 Schedule(
                     name=name,
-                    cron=cron,
+                    cron=fields,
                     every=every,
                     overlap=overlap,
                     queue=queue,
@@ -229,12 +241,14 @@ class Akadze:
         """
         if name not in self.tasks:
             raise AkadzeError(f"task {name} is not registered")
-        check_schedule(cron, every, timezone)
+        fields = cron_fields(cron)
+        check_schedule(fields, every, timezone)
+        check_schedule_task(self.tasks[name])
         resolved = queue if queue is not None else self.tasks[name].queue
         self.schedules.append(
             Schedule(
                 name=name,
-                cron=cron,
+                cron=fields,
                 every=every,
                 overlap=overlap,
                 queue=resolved,
