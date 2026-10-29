@@ -405,3 +405,23 @@ async def test_a_freed_slot_is_refilled_without_waiting_for_the_poll(
     finally:
         stop.set()
         await serving
+
+
+@pytest.mark.parametrize(
+    ("slots", "warns"),
+    [(13, False), (14, True)],
+    ids=["fits-5+10", "needs-16"],
+)
+async def test_serve_warns_when_the_pool_is_smaller_than_the_slots(
+    app: Akadze, caplog: pytest.LogCaptureFixture, slots: int, warns: bool
+) -> None:
+    # Arrange — the default pool holds 5 + 10; a worker needs slots + 2
+    worker = Worker(app, slots=slots, heartbeat_interval=timedelta(hours=1))
+    stop = asyncio.Event()
+    stop.set()
+
+    # Act
+    await worker.serve(stop)
+
+    # Assert
+    assert (f"needs {slots + 2}" in caplog.text) is warns

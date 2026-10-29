@@ -16,6 +16,23 @@ Since 0.6.0, a worker claims only jobs whose task is registered on its app. A jo
 
 A job whose task no worker registers (removed or renamed) stays queued with no error, keeps its `unique_key` taken and counts in queue lag. Cancel such jobs when you remove a task.
 
+### Connection pool
+
+Each running job holds a connection to start and another to record its outcome, one at a time, and the worker loop and heartbeat need one each. So a worker needs `slots × queues + 2` connections. The engine `Akadze(database_url=...)` builds has SQLAlchemy's default pool, 5 plus 10 overflow: enough for 13 slots. With more, runs wait for a connection; the worker logs a warning at start. Pass your own engine for larger workers:
+
+```python
+from sqlalchemy.ext.asyncio import create_async_engine
+
+engine = create_async_engine(
+    "postgresql+asyncpg://app@db/app",
+    pool_size=25,
+    connect_args={"statement_cache_size": 0},
+)
+app = Akadze(engine=engine)
+```
+
+On 2000 no-op jobs with 20 slots, `pool_size=25` takes the run from 7.8 s to 3.1 s.
+
 ### PgBouncer
 
 The engine `Akadze(database_url=...)` builds disables asyncpg's statement cache, so a transaction-mode pool can sit in front. If you pass your own `engine`, set `connect_args={"statement_cache_size": 0}` yourself.

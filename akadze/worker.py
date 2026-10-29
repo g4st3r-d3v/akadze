@@ -99,6 +99,32 @@ def _as_datetime(value: object) -> datetime:
     raise TypeError("worker timestamp must be a datetime")
 
 
+def _warn_small_pool(engine: Any, runs: int) -> None:
+    """Warn when the engine's pool cannot give every run its own connection.
+
+    Each run holds a connection to start and another to record its outcome,
+    one at a time; the loop and the heartbeat need one each. With fewer, runs
+    wait on the pool: the default pool (5 + 10 overflow) slows a worker with
+    20 slots by more than half.
+    """
+
+    pool = engine.pool
+    size = getattr(pool, "size", None)
+    overflow = getattr(pool, "_max_overflow", None)
+    if not callable(size) or not isinstance(overflow, int) or overflow < 0:
+        return  # NullPool, StaticPool, unlimited overflow: nothing to size
+    needed = runs + 2
+    if size() + overflow < needed:
+        logger.warning(
+            "engine pool holds %d connections (pool_size %d + max_overflow %d); "
+            "this worker needs %d (slots x queues + 2), so runs will wait for one",
+            size() + overflow,
+            size(),
+            overflow,
+            needed,
+        )
+
+
 def poll_delay(seconds: float, unit: float) -> float:
     """Wait in `[seconds / 2, seconds]` so empty polls do not line up or spin."""
 
@@ -288,6 +314,7 @@ class Worker:
         retried with backoff; any other error stops the worker.
         """
 
+        _warn_small_pool(self.app.engine, self.slots * len(self.queues))
         await self.register()
         self._last_heartbeat_ok = time.monotonic()
         loop = asyncio.create_task(self._loop(stop))
