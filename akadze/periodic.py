@@ -48,6 +48,8 @@ def check_schedule(cron: str | None, every: timedelta | None, timezone: object) 
         raise AkadzeError("schedule needs cron or every")
     if every is not None and every <= timedelta(0):
         raise AkadzeError("every must be positive")
+    if cron is not None:
+        _check_cron(cron)
     if timezone is None:
         return
     if not isinstance(timezone, str):
@@ -58,6 +60,19 @@ def check_schedule(cron: str | None, every: timedelta | None, timezone: object) 
         ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError):
         raise AkadzeError(f"unknown timezone {timezone!r}") from None
+
+
+def _check_cron(cron: str) -> None:
+    """Reject what the scheduler tick could not read, before a worker runs it.
+
+    Five fields, as in classic cron; croniter would read a sixth as seconds.
+    """
+
+    fields = cron.split()
+    if not cron.startswith("@") and len(fields) != 5:
+        raise AkadzeError(f"cron {cron!r} must have five fields")
+    if not croniter.is_valid(cron):
+        raise AkadzeError(f"cron {cron!r} is not a valid expression")
 
 
 def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:

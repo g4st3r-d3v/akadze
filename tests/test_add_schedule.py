@@ -84,6 +84,41 @@ async def test_add_schedule_rejects_both_cron_and_every(app: Akadze) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("cron", "match"),
+    [
+        ("not a cron", "must have five fields"),
+        ("0 0 * * * *", "must have five fields"),
+        ("61 * * * *", "is not a valid expression"),
+    ],
+)
+async def test_add_schedule_rejects_a_cron_the_scheduler_cannot_read(
+    app: Akadze, cron: str, match: str
+) -> None:
+    # Arrange
+    @app.task("tick")
+    async def tick() -> None:
+        return None
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match=match):
+        app.add_schedule("tick", cron=cron)
+    assert app.schedules == []
+
+
+async def test_periodic_rejects_a_cron_with_seconds(app: Akadze) -> None:
+    # Arrange — six fields: croniter would read the last one as seconds
+
+    # Act / Assert
+    with pytest.raises(AkadzeError, match="must have five fields"):
+
+        @app.periodic("tick", cron="0 0 * * * *")
+        async def tick() -> None:
+            return None
+
+    assert "tick" not in app.tasks
+
+
 async def test_add_schedules_from_dicts_and_specs(app: Akadze) -> None:
     # Arrange
     @app.task("a")

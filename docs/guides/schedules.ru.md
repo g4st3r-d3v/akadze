@@ -12,7 +12,7 @@ async def digest() -> None: ...
 async def heartbeat() -> None: ...
 ```
 
-`@app.periodic` принимает параметры задачи (`queue`, `max_attempts`, `timeout`, `backoff`) и ровно один из `cron` и `every`.
+`@app.periodic` принимает параметры задачи (`queue`, `max_attempts`, `timeout`, `backoff`) и ровно один из `cron` и `every`. `cron` — пять полей (или алиас вроде `@hourly`); выражение с секундами или такое, что не разбирается, бросает `AkadzeError` при регистрации.
 
 ## Из конфигурации
 
