@@ -87,9 +87,10 @@ async def test_add_schedule_rejects_both_cron_and_every(app: Akadze) -> None:
 @pytest.mark.parametrize(
     ("cron", "match"),
     [
-        ("not a cron", "must have five fields"),
-        ("0 0 * * * *", "must have five fields"),
+        ("not a cron", "is not a valid expression"),
         ("61 * * * *", "is not a valid expression"),
+        ("0 0 31 2 *", "never fires"),
+        (5, "cron must be a str"),
     ],
 )
 async def test_add_schedule_rejects_a_cron_the_scheduler_cannot_read(
@@ -106,17 +107,37 @@ async def test_add_schedule_rejects_a_cron_the_scheduler_cannot_read(
     assert app.schedules == []
 
 
-async def test_periodic_rejects_a_cron_with_seconds(app: Akadze) -> None:
-    # Arrange — six fields: croniter would read the last one as seconds
+@pytest.mark.parametrize(
+    ("cron", "fields"),
+    [("@hourly", "0 * * * *"), (" @Daily ", "0 0 * * *"), ("0  9 * * *", "0 9 * * *")],
+)
+async def test_add_schedule_keeps_the_cron_as_five_fields(
+    app: Akadze, cron: str, fields: str
+) -> None:
+    # Arrange
+    @app.task("tick")
+    async def tick() -> None:
+        return None
 
-    # Act / Assert
-    with pytest.raises(AkadzeError, match="must have five fields"):
+    # Act
+    app.add_schedule("tick", cron=cron)
 
-        @app.periodic("tick", cron="0 0 * * * *")
-        async def tick() -> None:
-            return None
+    # Assert
+    assert app.schedules[0].cron == fields
 
-    assert "tick" not in app.tasks
+
+async def test_periodic_warns_about_a_cron_with_seconds(
+    app: Akadze, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange — six fields: croniter reads the last one as seconds
+
+    # Act
+    @app.periodic("tick", cron="0 0 * * * *")
+    async def tick() -> None:
+        return None
+
+    # Assert
+    assert "six fields" in caplog.text
 
 
 async def test_add_schedules_from_dicts_and_specs(app: Akadze) -> None:

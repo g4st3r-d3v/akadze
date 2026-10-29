@@ -12,7 +12,7 @@ async def digest() -> None: ...
 async def heartbeat() -> None: ...
 ```
 
-`@app.periodic` takes the task options (`queue`, `max_attempts`, `timeout`, `backoff`) plus exactly one of `cron` and `every`. `cron` takes five fields (or an alias such as `@hourly`); an expression with seconds or one that does not parse raises `AkadzeError` at registration.
+`@app.periodic` takes the task options (`queue`, `max_attempts`, `timeout`, `backoff`) plus exactly one of `cron` and `every`. `cron` takes five fields; an alias such as `@hourly` is expanded to them. An expression that does not parse, or never fires (`0 0 31 2 *`), raises `AkadzeError` at registration; a sixth field is read as seconds and logs a warning.
 
 ## From configuration
 

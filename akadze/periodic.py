@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from croniter import croniter  # type: ignore[import-untyped]
+from croniter import CroniterError, croniter  # type: ignore[import-untyped]
 from sqlalchemy import text
 
 from akadze.args import dump_arguments
 from akadze.enqueue import insert_job
 from akadze.exc import AkadzeError, DuplicateJob
+
+logger = logging.getLogger("akadze.periodic")
+
+# Names already reported as unreadable, so a broken schedule logs once per process.
+_UNREADABLE: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -62,17 +68,43 @@ def check_schedule(cron: str | None, every: timedelta | None, timezone: object) 
         raise AkadzeError(f"unknown timezone {timezone!r}") from None
 
 
-def _check_cron(cron: str) -> None:
-    """Reject what the scheduler tick could not read, before a worker runs it.
+_ALIASES = {
+    "@yearly": "0 0 1 1 *",
+    "@annually": "0 0 1 1 *",
+    "@monthly": "0 0 1 * *",
+    "@weekly": "0 0 * * 0",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly": "0 * * * *",
+}
 
-    Five fields, as in classic cron; croniter would read a sixth as seconds.
+
+def cron_fields(cron: str | None) -> str | None:
+    """Return the cron as space-separated fields, with an alias such as ``@hourly`` expanded.
+
+    The DST rules read the hour field, so a schedule keeps its fields, not an alias.
     """
 
-    fields = cron.split()
-    if not cron.startswith("@") and len(fields) != 5:
-        raise AkadzeError(f"cron {cron!r} must have five fields")
-    if not croniter.is_valid(cron):
+    if cron is None or not isinstance(cron, str):
+        return cron
+    stripped = " ".join(cron.split())
+    return _ALIASES.get(stripped.lower(), stripped)
+
+
+def _check_cron(cron: object) -> None:
+    """Reject a cron the scheduler tick could not read, before a worker runs it."""
+
+    if not isinstance(cron, str):
+        raise AkadzeError("cron must be a str")
+    fields = cron_fields(cron) or ""
+    if not croniter.is_valid(fields):
         raise AkadzeError(f"cron {cron!r} is not a valid expression")
+    try:
+        croniter(fields, datetime.now(UTC)).get_next(datetime)
+    except CroniterError:
+        raise AkadzeError(f"cron {cron!r} never fires") from None
+    if len(fields.split()) == 6:
+        logger.warning("cron %r has six fields; the sixth is read as seconds", cron)
 
 
 def previous_fire(schedule: Schedule, now: datetime) -> datetime | None:
@@ -157,6 +189,11 @@ async def schedule_due(app: Any) -> None:
             await _schedule_one(app, schedule)
         except DuplicateJob:
             continue
+        except CroniterError as exc:
+            # One unreadable schedule must not stop the worker and every other schedule.
+            if schedule.name not in _UNREADABLE:
+                _UNREADABLE.add(schedule.name)
+                logger.error("schedule %s skipped: %s", schedule.name, exc)
 
 
 async def _schedule_one(app: Any, schedule: Schedule) -> None:

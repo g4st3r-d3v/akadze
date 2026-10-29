@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from akadze.exc import AkadzeError
 from akadze.hooks import Hooks
 from akadze.outcome import BackoffPolicy
-from akadze.periodic import Schedule, ScheduleSpec, check_schedule
+from akadze.periodic import Schedule, ScheduleSpec, check_schedule, cron_fields
 from akadze.schema import async_database_url
 from akadze.task import Task
 
@@ -201,7 +201,7 @@ class Akadze:
             self.schedules.append(
                 Schedule(
                     name=name,
-                    cron=cron,
+                    cron=cron_fields(cron),
                     every=every,
                     overlap=overlap,
                     queue=queue,
@@ -234,7 +234,7 @@ class Akadze:
         self.schedules.append(
             Schedule(
                 name=name,
-                cron=cron,
+                cron=cron_fields(cron),
                 every=every,
                 overlap=overlap,
                 queue=resolved,
