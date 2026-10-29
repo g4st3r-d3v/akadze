@@ -1,0 +1,84 @@
+site_name: akadze
+site_description: Postgres-backed task queue for Python. The broker is PostgreSQL.
+site_url: https://g4st3r-d3v.github.io/akadze/
+repo_url: https://github.com/g4st3r-d3v/akadze
+repo_name: g4st3r-d3v/akadze
+edit_uri: edit/main/docs/
+copyright: MIT License
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_if_no_docstring: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            heading_level: 3
+            merge_init_into_class: true
+            filters: ["!^_"]
+
+nav:
+  - Home: index.md
+  - First task: first-task.md
+  - Guides:
+      - Tasks and the app: guides/tasks.md
+      - Enqueue: guides/enqueue.md
+      - Retries, cancel and completion: guides/retries.md
+      - Periodic schedules: guides/schedules.md
+      - Limits and fair claim: guides/limits.md
+      - Testing: guides/testing.md
+      - Deploy and operate: guides/operations.md
+      - Moving from Celery: guides/celery.md
+  - Concepts:
+      - Delivery and the worker: concepts/delivery.md
+      - How a claim works: concepts/claim.md
+  - Reference:
+      - Python API: reference/api.md
+      - CLI: reference/cli.md
+      - Job states: reference/states.md

@@ -33,3 +33,4 @@ htmlcov/
 # Local scratch
 local_scripts/
 *.log
+site/
