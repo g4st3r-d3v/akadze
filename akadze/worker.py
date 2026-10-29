@@ -37,6 +37,7 @@ from akadze.job import (
 from akadze.maintenance import prune, rescue
 from akadze.outcome import BackoffPolicy, decide, push_error
 from akadze.periodic import schedule_due
+from akadze.ready import to_cancel
 from akadze.schema import DB_ERRORS, is_transient_db_error, public_db_error
 
 logger = logging.getLogger("akadze")
@@ -671,10 +672,7 @@ async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> 
                 FROM akadze.jobs
                 WHERE state = 'queued'
                   AND queue = :queue
-                  AND (
-                        cancel_requested_at IS NOT NULL
-                        OR (expires_at IS NOT NULL AND expires_at <= now())
-                  )
+                  AND {to_cancel("jobs")}
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING {_COLUMNS}, false AS expired

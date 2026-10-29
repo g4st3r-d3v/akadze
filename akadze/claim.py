@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from akadze.hooks import Hooks
 from akadze.job import Job, columns, job_from_mapping
+from akadze.ready import claimable
 
 logger = logging.getLogger("akadze")
 
@@ -220,20 +221,12 @@ class ClaimPlan:
         self._groups[row.id] = key
 
 
-_READY_COLUMNS = """
+_READY_COLUMNS = f"""
         SELECT j.id, j.limit_key, j.priority, j.run_at
         FROM akadze.jobs AS j
-        WHERE j.state = 'queued'
-          AND j.queue = :queue
+        WHERE j.queue = :queue
+          AND {claimable("j")}
           AND j.task = ANY(CAST(:tasks AS text[]))
-          AND j.run_at <= now()
-          AND j.cancel_requested_at IS NULL
-          AND (j.expires_at IS NULL OR j.expires_at > now())
-          AND NOT EXISTS (
-              SELECT 1
-              FROM akadze.queue_pauses
-              WHERE queue_pauses.queue = :queue
-          )
           AND (j.limit_key IS NOT NULL OR NOT :without_key)
           AND (j.limit_key IS NULL OR j.limit_key <> ALL(CAST(:excluded AS text[])))
           AND j.id <> ALL(CAST(:held AS bigint[]))"""
@@ -492,15 +485,7 @@ async def _take(
                 SELECT job.id
                 FROM akadze.jobs AS job
                 INNER JOIN planned ON planned.id = job.id
-                WHERE job.state = 'queued'
-                  AND job.run_at <= now()
-                  AND job.cancel_requested_at IS NULL
-                  AND (job.expires_at IS NULL OR job.expires_at > now())
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM akadze.queue_pauses
-                      WHERE queue_pauses.queue = job.queue
-                  )
+                WHERE {claimable("job")}
                   AND (
                         job.limit_key IS NULL
                         OR job.limit_key = ANY(CAST(:locked AS text[]))
