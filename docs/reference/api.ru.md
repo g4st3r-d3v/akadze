@@ -38,6 +38,8 @@
 
 ::: akadze.BackoffPolicy
 
+`BackoffPolicy` — это `Callable[[int], timedelta]`: принимает номер только что упавшей попытки и возвращает задержку до следующей. Должна быть обычной (не async) функцией.
+
 ## Ошибки
 
 ::: akadze.AkadzeError

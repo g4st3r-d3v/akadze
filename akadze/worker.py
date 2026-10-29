@@ -119,6 +119,19 @@ class _Lost(Exception):
 
 
 class Worker:
+    """Claims jobs from ``queues`` and runs them; also runs schedules and maintenance.
+
+    ``slots`` is how many jobs run at once per queue. Liveness is a heartbeat
+    every ``heartbeat_interval``; a worker whose heartbeat is older than
+    ``heartbeat_ttl`` is presumed dead and its jobs are requeued by others.
+    An idle worker polls about every ``poll_interval``. On stop it waits up to
+    ``shutdown_timeout`` for running jobs, then returns the rest to the queue
+    without spending an attempt. ``fair=True`` shares slots across
+    ``limit_key`` groups within a priority instead of taking the oldest jobs.
+
+    ``akadze worker module:app`` builds one and calls ``serve``.
+    """
+
     def __init__(
         self,
         app: Any,

@@ -38,6 +38,8 @@ Everything below is importable from `akadze` unless the heading says otherwise. 
 
 ::: akadze.BackoffPolicy
 
+`BackoffPolicy` is `Callable[[int], timedelta]`: it takes the number of the attempt that just failed and returns the delay before the next one. It must be a plain (not async) function.
+
 ## Errors
 
 ::: akadze.AkadzeError

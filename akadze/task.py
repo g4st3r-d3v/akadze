@@ -19,6 +19,11 @@ P = ParamSpec("P")
 
 
 class Task(Generic[P]):
+    """A registered task. ``@app.task`` and ``app.register`` return one.
+
+    Enqueue it through ``using``: ``await task.using(session=conn).enqueue(...)``.
+    """
+
     def __init__(
         self,
         app: Any,
@@ -56,6 +61,17 @@ class Task(Generic[P]):
         expires_at: datetime | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> BoundTask[P]:
+        """Bind enqueue options; the jobs are inserted on ``session``, in its transaction.
+
+        ``delay`` or ``run_at`` (timezone-aware) set the earliest start.
+        ``priority`` and ``max_attempts`` override the task's defaults for
+        these jobs. While a job with ``unique_key`` is queued or running,
+        another enqueue with that key raises ``DuplicateJob``. ``limit_key``
+        names the limits that apply (see ``set_limit``). A job not started by
+        ``expires_at`` is cancelled. ``meta`` is a small JSON object with
+        string keys, at most 8 KiB, for filtering and hooks; not for arguments
+        or secrets.
+        """
         return BoundTask(
             self,
             session=session,
@@ -74,6 +90,8 @@ class Task(Generic[P]):
 
 
 class BoundTask(Generic[P]):
+    """A task bound to a session and enqueue options; ``Task.using`` returns one."""
+
     def __init__(
         self,
         task: Task[P],
@@ -100,6 +118,12 @@ class BoundTask(Generic[P]):
         self._meta = meta
 
     async def enqueue(self, *args: P.args, **kwargs: P.kwargs) -> None:
+        """Insert one job with these arguments (by name). Returns nothing.
+
+        Raises ``EnqueueError`` on invalid arguments or options and
+        ``DuplicateJob`` when ``unique_key`` is taken; neither inserts a row.
+        ``DuplicateJob`` does not abort the caller's transaction.
+        """
         if args:
             raise AkadzeError(f"pass arguments to {self._task.name} by name")
         payload = dump_arguments(self._task.arguments, kwargs, task=self._task.name)
