@@ -165,6 +165,10 @@ class Worker:
         self._fatal: BaseException | None = None
         self._draining = False
         self._last_claim_full = False
+        # Set when a run ends. A claim that found no free slot waits on it, not
+        # on the poll interval, so a slot is refilled as soon as it frees up.
+        self._slot_freed = asyncio.Event()
+        self._slots_taken = False
 
     async def register(self) -> None:
         async with self.app.engine.begin() as connection:
@@ -223,7 +227,9 @@ class Worker:
         """
 
         full = False
+        taken = False
         self._last_claim_full = False
+        self._slot_freed.clear()
         tasks = list(self.app.tasks)
         for queue in self.queues:
             async with self.app.engine.begin() as connection:
@@ -241,7 +247,9 @@ class Worker:
                 )
                 if limit > 0 and claimed == limit:
                     full = True
+                taken |= limit <= 0
         self._last_claim_full = full
+        self._slots_taken = taken
 
     @property
     def running(self) -> tuple[asyncio.Task[None], ...]:
@@ -365,7 +373,19 @@ class Worker:
             await self._pause(stop)
 
     async def _pause(self, stop: asyncio.Event) -> None:
-        await self._wait(stop, poll_delay(self.poll_interval.total_seconds(), random.random()))
+        delay = poll_delay(self.poll_interval.total_seconds(), random.random())
+        if not self._slots_taken:
+            await self._wait(stop, delay)
+            return
+        # Every slot of some queue was taken: the queue may hold more, so claim
+        # again as soon as a run ends instead of sleeping the whole interval.
+        freed = asyncio.ensure_future(self._slot_freed.wait())
+        stopped = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({freed, stopped}, timeout=delay, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            freed.cancel()
+            stopped.cancel()
 
     def _stale(self) -> bool:
         return self._heartbeat_left() <= 0
@@ -479,6 +499,7 @@ class Worker:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
+            self._slot_freed.set()
 
     async def _record(
         self,

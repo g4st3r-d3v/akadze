@@ -360,3 +360,37 @@ async def test_full_claim_polls_again_before_sleeping(app: Akadze, database_url:
     assert len(rows) == 2
     assert rows[0]["run_count"] == 1
     assert rows[1]["run_count"] == 1
+
+
+async def test_a_freed_slot_is_refilled_without_waiting_for_the_poll(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange — one slot, two quick jobs, and a poll interval no test would outlive
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app,
+        slots=1,
+        poll_interval=timedelta(hours=1),
+        heartbeat_interval=timedelta(hours=1),
+    )
+    stop = asyncio.Event()
+
+    # Act
+    serving = asyncio.create_task(worker.serve(stop))
+    try:
+        async with asyncio.timeout(10):
+            while [row["state"] for row in await job_rows(database_url)] != ["succeeded"] * 2:
+                await asyncio.sleep(0.02)
+    finally:
+        stop.set()
+        await serving
+
+    # Assert
+    rows = await job_rows(database_url)
+    assert [row["state"] for row in rows] == ["succeeded", "succeeded"]
