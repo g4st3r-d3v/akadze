@@ -60,7 +60,7 @@ akadze jobs cancel JOB_ID
 `request_cancel` marks a `queued` or `running` job; other states and missing ids are a no-op. The CLI exits 1 with `job is not active` in that case.
 
 - A job cancelled, or past its `expires_at`, before it starts is `cancelled` without running.
-- A running task is not interrupted. Since 0.6.0 (on PyPI: 0.5.0 still ends such a job `cancelled`): When the body returns, the job is `succeeded` with its result: its side effects happened. When it raises anything (`Retry` and `Snooze` included) or returns a non-JSON result, it ends `cancelled` and no attempt is spent.
+- A running task is not interrupted. Since 0.6.0 (on PyPI: 0.5.0 still ends such a job `cancelled`): when the body returns, the job is `succeeded` with its result: its side effects happened. When it raises anything (`Retry` and `Snooze` included) or returns a non-JSON result, it ends `cancelled` and no attempt is spent.
 
 ## Requeue a failed job
 
