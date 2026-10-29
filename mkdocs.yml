@@ -30,6 +30,9 @@ theme:
         icon: material/weather-sunny
         name: Light mode
 
+validation:
+  anchors: warn
+
 markdown_extensions:
   - admonition
   - attr_list
@@ -70,7 +73,7 @@ plugins:
             Tasks and the app: Задачи и приложение
             Enqueue: Постановка в очередь
             Retries, cancel and completion: Ретраи, отмена и завершение
-            Periodic schedules: Периодические задачи
+            Periodic schedules: Расписания
             Limits and fair claim: Лимиты и fair claim
             Testing: Тестирование
             Deploy and operate: Деплой и эксплуатация
@@ -79,9 +82,7 @@ plugins:
             Delivery and the worker: Доставка и воркер
             How a claim works: Как работает claim
             Reference: Справочник
-            Python API: Python API
-            CLI: CLI
-            Job states: Состояния задачи
+            Job states: Состояния задания
   - mkdocstrings:
       handlers:
         python:

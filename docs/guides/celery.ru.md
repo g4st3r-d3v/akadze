@@ -82,7 +82,7 @@ async def build(report_id: int) -> None:
 
 ## 7. Эксплуатация
 
-Экраны Flower заменяют CLI и запросы: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID` и `akadze metrics` для sidecar Prometheus. Сигналы: `task_prerun` → `app.hooks.before_run`; `task_success` → `app.hooks.after_run`, который вызывается, только когда задача вернула значение, и внутри её таймаута (ошибка в нём тратит попытку, и при ретрае тело выполняется заново); `task_postrun`, `task_failure` и `task_retry` → `app.hooks.on_transition`, который видит каждую смену состояния в транзакции, где она происходит.
+Вместо экранов Flower — CLI и запросы: `akadze jobs list`, `akadze workers list`, `akadze limits list`, `akadze jobs requeue JOB_ID` и `akadze metrics` для sidecar Prometheus. Сигналы: `task_prerun` → `app.hooks.before_run`; `task_success` → `app.hooks.after_run`, который вызывается, только когда задача вернула значение, и внутри её таймаута (ошибка в нём тратит попытку, и при ретрае тело выполняется заново); `task_postrun`, `task_failure` и `task_retry` → `app.hooks.on_transition`, который видит каждую смену состояния в транзакции, где она происходит.
 
 ## Чего нет и почему
 
