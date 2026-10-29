@@ -43,5 +43,6 @@ pip install akadze
 
 - New here: [First task](first-task.md), then a runnable [FastAPI example](examples.md).
 - Coming from Celery: [Moving from Celery](guides/celery.md).
+- How it compares on throughput: [Benchmark](benchmark.md).
 - Running it in production: [Deploy and operate](guides/operations.md) and [Delivery and the worker](concepts/delivery.md).
 - Design notes and decisions live in [akadze-harness](https://github.com/g4st3r-d3v/akadze-harness).

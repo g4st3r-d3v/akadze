@@ -82,6 +82,7 @@ plugins:
             Concepts: Как это устроено
             Delivery and the worker: Доставка и воркер
             How a claim works: Как работает claim
+            Benchmark: Бенчмарк
             Reference: Справочник
             Job states: Состояния задания
   - mkdocstrings:
@@ -116,6 +117,7 @@ nav:
   - Concepts:
       - Delivery and the worker: concepts/delivery.md
       - How a claim works: concepts/claim.md
+      - Benchmark: benchmark.md
   - Reference:
       - Python API: reference/api.md
       - CLI: reference/cli.md
