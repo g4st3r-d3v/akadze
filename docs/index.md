@@ -11,6 +11,9 @@ pip install akadze
 
     These pages follow the `main` branch, which may be ahead of the latest release on PyPI. Behavior that changed in 0.6.0 is marked "since 0.6.0"; see the [release notes](https://github.com/g4st3r-d3v/akadze/releases) for upgrades.
 
+!!! note "Terms"
+    A **task** is a registered function. A **job** is a row in `akadze.jobs`: one call of a task with its arguments. A **claim** is a worker taking jobs from a queue.
+
 ## Why Postgres as the broker
 
 - **Enqueue is transactional.** `enqueue` runs on your connection. If your transaction rolls back, the job is gone too. No `on_commit` hooks, no outbox table.

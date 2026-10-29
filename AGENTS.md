@@ -12,6 +12,7 @@ Library: Postgres task queue and worker. Periodic schedules run inside the worke
 - Conventional commits
 - Tests hit real Postgres through `AKADZE_DATABASE_URL`. Do not add an in-memory database
 - Tests follow AAA: Arrange, Act, Assert, one act per test
+- User docs live in `docs/` (MkDocs). Every page has a Russian twin `page.ru.md`: change both; `.github/scripts/docs_parity.py` checks their structure
 - Commands change state and return nothing. Queries return state and change nothing. Pure functions do neither
 
 ## Ask first
