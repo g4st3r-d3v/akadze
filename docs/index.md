@@ -9,7 +9,7 @@ pip install akadze
 !!! warning "Status: alpha (0.x)"
     The public API may still change between minor versions until 1.0. Report bugs in [Issues](https://github.com/g4st3r-d3v/akadze/issues).
 
-    These pages follow the `main` branch, which is ahead of the latest release on PyPI (0.5.0). Behavior that changed after 0.5.0 is marked "since 0.6.0".
+    These pages follow the `main` branch. Behavior that changed in 0.6.0 is marked "since 0.6.0"; see the [release notes](https://github.com/g4st3r-d3v/akadze/releases) for upgrades.
 
 ## Why Postgres as the broker
 

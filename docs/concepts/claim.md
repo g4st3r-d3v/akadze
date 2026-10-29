@@ -34,7 +34,7 @@ A claim locks the limits rows of the keys it considers, then counts running jobs
 ## Speed
 
 !!! note
-    The windowed claim is on `main` and ships in the first release after 0.5.0.
+    The windowed claim is in akadze 0.6.0 and later.
 
 PostgreSQL 16, `slots = 20`, 100 000 ready jobs, median of 15 claims. "Before" is akadze 0.5.0, which ranked the whole queue in one statement whenever the head did not fill the claim, and always in fair mode.
 
