@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from akadze.enqueue import dump_meta
 from akadze.exc import AkadzeError, EnqueueError
 from akadze.job import _decode_json
+from akadze.ready import due, to_cancel
 
 _JOB_STATES = frozenset({"queued", "running", "succeeded", "failed", "cancelled"})
 _LIMIT_MIN = 1
@@ -66,13 +67,11 @@ async def queue_snapshot(engine: AsyncEngine) -> QueueSnapshot:
         )
         lag = await connection.scalar(
             text(
-                """
+                f"""
                 SELECT now() - min(run_at)
                 FROM akadze.jobs
-                WHERE state = 'queued'
-                  AND run_at <= now()
-                  AND cancel_requested_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > now())
+                WHERE {due("jobs")}
+                  AND NOT {to_cancel("jobs")}
                 """
             )
         )

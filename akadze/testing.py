@@ -20,7 +20,7 @@ _READY = f"""
         SELECT
             task,
             {to_cancel("jobs")} AS due_to_cancel,
-            {unpaused("jobs")} AS unpaused
+            {unpaused("jobs.queue")} AS unpaused
         FROM akadze.jobs
         WHERE {due("jobs")}
           AND queue = ANY(CAST(:queues AS text[]))

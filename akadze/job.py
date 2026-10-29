@@ -12,6 +12,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from akadze.ready import expired
+
 _COLUMN_NAMES = (
     "id",
     "task",
@@ -103,7 +105,7 @@ async def running_jobs(connection: AsyncConnection, worker_id: UUID) -> list[Job
         text(
             f"""
             SELECT {_COLUMNS},
-                   (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+                   {expired("jobs")} AS expired
             FROM akadze.jobs
             WHERE state = 'running' AND worker_id = :worker_id
             ORDER BY id
@@ -133,7 +135,7 @@ async def job_by_id(connection: AsyncConnection, job_id: int) -> Job | None:
         text(
             f"""
             SELECT {_COLUMNS},
-                   (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+                   {expired("jobs")} AS expired
             FROM akadze.jobs
             WHERE id = :id
             """

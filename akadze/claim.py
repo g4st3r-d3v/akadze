@@ -225,7 +225,7 @@ _READY_COLUMNS = f"""
         SELECT j.id, j.limit_key, j.priority, j.run_at
         FROM akadze.jobs AS j
         WHERE j.queue = :queue
-          AND {claimable("j")}
+          AND {claimable("j", ":queue")}
           AND j.task = ANY(CAST(:tasks AS text[]))
           AND (j.limit_key IS NOT NULL OR NOT :without_key)
           AND (j.limit_key IS NULL OR j.limit_key <> ALL(CAST(:excluded AS text[])))

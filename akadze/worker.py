@@ -668,11 +668,11 @@ async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> 
             UPDATE akadze.jobs
             SET state = 'cancelled', finished_at = now()
             WHERE id IN (
-                SELECT id
-                FROM akadze.jobs
-                WHERE state = 'queued'
-                  AND queue = :queue
-                  AND {to_cancel("jobs")}
+                SELECT due.id
+                FROM akadze.jobs AS due
+                WHERE due.state = 'queued'
+                  AND due.queue = :queue
+                  AND {to_cancel("due")}
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING {_COLUMNS}, false AS expired
