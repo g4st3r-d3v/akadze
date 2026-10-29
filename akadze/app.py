@@ -24,6 +24,28 @@ _SCHEDULE_SPEC_KEYS = frozenset({"name", "cron", "every", "overlap", "queue", "t
 
 
 class Akadze:
+    """The application: an engine, the registered tasks and the schedules.
+
+    Pass ``database_url`` and the app builds an async engine it owns (and
+    closes in ``aclose``), with asyncpg's statement cache off. Pass ``engine``
+    instead to share a pool; the app then leaves it open. One of the two is
+    required.
+
+    ``grace`` is how late a periodic fire may still be enqueued (default one
+    minute). ``retention`` is how long finished jobs and periodic runs are
+    kept before the worker deletes them (default seven days). Keep
+    ``retention`` longer than ``grace``: a periodic run deleted inside the
+    grace window can be enqueued again.
+
+    Example:
+        ```python
+        app = Akadze(database_url="postgresql://localhost/app")
+
+        @app.task("mail.send", queue="mail", max_attempts=6)
+        async def send_mail(user_id: int) -> None: ...
+        ```
+    """
+
     def __init__(
         self,
         *,
@@ -118,6 +140,18 @@ class Akadze:
         priority: int = 0,
         backoff: BackoffPolicy | None = None,
     ) -> Callable[[Callable[P, Any]], Task[P]]:
+        """Register the decorated function as task ``name`` and return its ``Task``.
+
+        ``queue`` is where its jobs go; workers claim from the queues they are
+        started with. ``max_attempts`` is the budget including the first run.
+        A run longer than ``timeout`` counts as an error and is retried.
+        ``priority`` is the default for its jobs (higher is claimed first).
+        ``backoff`` maps the attempt number to the delay before the next one
+        (default: exponential with jitter, capped at 300 s). Arguments are
+        validated by a model built from the signature. Same options as
+        ``register``.
+        """
+
         def decorate(fn: Callable[P, Any]) -> Task[P]:
             return self.register(
                 fn,
@@ -144,6 +178,16 @@ class Akadze:
         timezone: str | None = None,
         backoff: BackoffPolicy | None = None,
     ) -> Callable[[Callable[..., Any]], Task[Any]]:
+        """Register the decorated function as a task that runs on a schedule.
+
+        Give exactly one of ``cron`` (five fields, UTC unless ``timezone``
+        names an IANA zone) and ``every`` (a ``timedelta``). Every worker runs
+        the schedule; each due fire is enqueued once across the cluster.
+        ``overlap=False`` holds a fire back while the previous job is queued or
+        running, for at most the app's ``grace``. ``queue``, ``max_attempts``,
+        ``timeout`` and ``backoff`` are those of ``task``; periodic jobs have
+        priority 0.
+        """
         check_schedule(cron, every, timezone)
 
         def decorate(fn: Callable[..., Any]) -> Task[Any]:
@@ -213,6 +257,8 @@ class Akadze:
             )
 
     async def aclose(self) -> None:
+        """Dispose of the engine if the app built it from ``database_url``."""
+
         if self._owns_engine:
             await self.engine.dispose()
 
