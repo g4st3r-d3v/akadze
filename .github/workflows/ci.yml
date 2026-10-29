@@ -79,6 +79,7 @@ jobs:
         with:
           python-version: "3.13"
       # The package from this checkout, so an example breaks in the PR that breaks it.
-      - run: pip install . fastapi==0.115.12 httpx==0.28.1 pytest==8.3.5 pytest-asyncio==0.25.3
+      - run: pip install . -r requirements-test.txt $(grep -v '^akadze' requirements.txt)
+        working-directory: examples/fastapi
       - run: pytest
         working-directory: examples/fastapi

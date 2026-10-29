@@ -1,6 +1,6 @@
 # Examples
 
-Runnable projects live in [`examples/`](https://github.com/g4st3r-d3v/akadze/tree/main/examples) in the repository. CI runs each one against the package from the same commit, so they keep working.
+Runnable projects live in [`examples/`](https://github.com/g4st3r-d3v/akadze/tree/main/examples) in the repository. CI runs each example's tests against the package from the same commit, so they keep working; the Docker images install the matching release from PyPI.
 
 ## FastAPI
 

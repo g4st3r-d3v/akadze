@@ -1,21 +1,29 @@
-"""Runs the example against a real Postgres: ``pytest examples/fastapi``.
+"""Runs the example against a real Postgres: ``pytest`` in this directory.
 
-Uses ``AKADZE_DATABASE_URL`` and recreates schema ``akadze`` and the example
-table in it, so point it at a test database.
+Needs ``AKADZE_DATABASE_URL`` pointing at a database whose name ends in
+``_test``: each test drops schema ``akadze`` and the example's
+``example_orders`` table there and sets both up again.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 import pytest
-from main import api, app
-from orders import metadata
-from setup_db import main as setup_database
 from sqlalchemy import text
 
-from akadze.testing import assert_enqueued, drain
+if not urlparse(os.environ.get("AKADZE_DATABASE_URL", "")).path.endswith("_test"):
+    pytest.exit("set AKADZE_DATABASE_URL to a database whose name ends in _test", returncode=2)
+
+from main import api, app  # noqa: E402
+from orders import metadata  # noqa: E402
+from setup_db import main as setup_database  # noqa: E402
+
+from akadze import list_jobs  # noqa: E402
+from akadze.testing import assert_enqueued, drain  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -35,10 +43,22 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         yield opened
 
 
-async def test_an_order_is_confirmed_by_the_worker(client: httpx.AsyncClient) -> None:
+async def test_creating_an_order_enqueues_its_confirmation(client: httpx.AsyncClient) -> None:
+    # Arrange — an empty queue
+
+    # Act
+    response = await client.post("/orders", json={"email": "ada@example.com"})
+
+    # Assert
+    assert response.status_code == 201
+    await assert_enqueued(app, "orders.confirm", order_id=response.json()["id"])
+
+
+async def test_the_worker_confirms_the_order_and_queues_a_receipt(
+    client: httpx.AsyncClient,
+) -> None:
     # Arrange
     created = (await client.post("/orders", json={"email": "ada@example.com"})).json()
-    await assert_enqueued(app, "orders.confirm", order_id=created["id"])
 
     # Act
     await drain(app)
@@ -46,3 +66,5 @@ async def test_an_order_is_confirmed_by_the_worker(client: httpx.AsyncClient) ->
     # Assert
     order = (await client.get(f"/orders/{created['id']}")).json()
     assert order["status"] == "confirmed"
+    receipts = await list_jobs(app.engine, queue="mail", state="succeeded")
+    assert [job.task for job in receipts] == ["orders.receipt"]
