@@ -405,3 +405,33 @@ async def test_a_freed_slot_is_refilled_without_waiting_for_the_poll(
     finally:
         stop.set()
         await serving
+
+
+@pytest.mark.parametrize(
+    ("slots", "warns"),
+    [(13, False), (14, True)],
+    ids=["fits-5+10", "needs-16"],
+)
+async def test_serve_warns_when_the_pool_is_smaller_than_the_slots(
+    app: Akadze, caplog: pytest.LogCaptureFixture, slots: int, warns: bool
+) -> None:
+    # Arrange — the default pool holds 5 + 10; a worker needs slots + 2
+    worker = Worker(app, slots=slots, heartbeat_interval=timedelta(hours=1))
+    stop = asyncio.Event()
+    stop.set()
+
+    # Act
+    await worker.serve(stop)
+
+    # Assert
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "engine pool" in record.getMessage()
+    ]
+    expected = (
+        "engine pool holds 15 connections (pool_size 5 + max_overflow 10); "
+        f"this worker needs at least {slots + 2} (slots x queues + 2), "
+        "so runs will wait for one"
+    )
+    assert warnings == ([expected] if warns else [])
