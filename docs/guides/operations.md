@@ -18,7 +18,7 @@ A job whose task no worker registers (removed or renamed) stays queued with no e
 
 ### Connection pool
 
-Each running job holds a connection to start and another to record its outcome, one at a time, and the worker loop and heartbeat need one each. So a worker needs `slots × queues + 2` connections. The engine `Akadze(database_url=...)` builds has SQLAlchemy's default pool, 5 plus 10 overflow: enough for 13 slots. With more, runs wait for a connection; the worker logs a warning at start. Pass your own engine for larger workers:
+Each running job holds a connection to start and another to record its outcome, one at a time, and the worker loop and heartbeat need one each. So a worker needs at least `slots × queues + 2` connections, more if task bodies use `app.engine` themselves or a web app shares it. The engine `Akadze(database_url=...)` builds has SQLAlchemy's default pool, 5 plus 10 overflow: enough for 13 concurrent runs (`slots × queues`). With more, runs wait for a connection; the worker logs a warning at start. Pass your own engine for larger workers:
 
 ```python
 from sqlalchemy.ext.asyncio import create_async_engine

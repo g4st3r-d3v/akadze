@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.pool import QueuePool
 
 from akadze.args import load_arguments
 from akadze.claim import claim_queue
@@ -99,27 +100,32 @@ def _as_datetime(value: object) -> datetime:
     raise TypeError("worker timestamp must be a datetime")
 
 
-def _warn_small_pool(engine: Any, runs: int) -> None:
+def _warn_small_pool(engine: AsyncEngine, runs: int) -> None:
     """Warn when the engine's pool cannot give every run its own connection.
 
     Each run holds a connection to start and another to record its outcome,
-    one at a time; the loop and the heartbeat need one each. With fewer, runs
-    wait on the pool: the default pool (5 + 10 overflow) slows a worker with
-    20 slots by more than half.
+    one at a time; the loop and the heartbeat need one each. That is a lower
+    bound: task bodies and a web app sharing the engine take more. With fewer,
+    runs wait on the pool: the default pool (5 + 10 overflow) slows a worker
+    with 20 slots by more than half.
     """
 
     pool = engine.pool
-    size = getattr(pool, "size", None)
+    if not isinstance(pool, QueuePool):
+        return  # NullPool, StaticPool: nothing to size
+    # SQLAlchemy has no public reader for max_overflow; -1 means unlimited.
     overflow = getattr(pool, "_max_overflow", None)
-    if not callable(size) or not isinstance(overflow, int) or overflow < 0:
-        return  # NullPool, StaticPool, unlimited overflow: nothing to size
+    if not isinstance(overflow, int) or overflow < 0:
+        logger.debug("engine pool overflow unknown or unlimited; size not checked")
+        return
+    capacity = pool.size() + overflow
     needed = runs + 2
-    if size() + overflow < needed:
+    if capacity < needed:
         logger.warning(
             "engine pool holds %d connections (pool_size %d + max_overflow %d); "
-            "this worker needs %d (slots x queues + 2), so runs will wait for one",
-            size() + overflow,
-            size(),
+            "this worker needs at least %d (slots x queues + 2), so runs will wait for one",
+            capacity,
+            pool.size(),
             overflow,
             needed,
         )

@@ -424,4 +424,14 @@ async def test_serve_warns_when_the_pool_is_smaller_than_the_slots(
     await worker.serve(stop)
 
     # Assert
-    assert (f"needs {slots + 2}" in caplog.text) is warns
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "engine pool" in record.getMessage()
+    ]
+    expected = (
+        "engine pool holds 15 connections (pool_size 5 + max_overflow 10); "
+        f"this worker needs at least {slots + 2} (slots x queues + 2), "
+        "so runs will wait for one"
+    )
+    assert warnings == ([expected] if warns else [])
