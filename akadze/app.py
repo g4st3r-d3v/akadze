@@ -27,14 +27,15 @@ class Akadze:
     """The application: an engine, the registered tasks and the schedules.
 
     Pass ``database_url`` and the app builds an async engine it owns (and
-    closes in ``aclose``), with asyncpg's statement cache off so a
-    transaction-mode pool such as PgBouncer can sit in front. Pass ``engine``
+    closes in ``aclose``), with asyncpg's statement cache off. Pass ``engine``
     instead to share a pool; the app then leaves it open. One of the two is
     required.
 
     ``grace`` is how late a periodic fire may still be enqueued (default one
     minute). ``retention`` is how long finished jobs and periodic runs are
-    kept before the worker deletes them (default seven days).
+    kept before the worker deletes them (default seven days). Keep
+    ``retention`` longer than ``grace``: a periodic run deleted inside the
+    grace window can be enqueued again.
 
     Example:
         ```python
@@ -183,8 +184,9 @@ class Akadze:
         names an IANA zone) and ``every`` (a ``timedelta``). Every worker runs
         the schedule; each due fire is enqueued once across the cluster.
         ``overlap=False`` holds a fire back while the previous job is queued or
-        running, for at most the app's ``grace``. The other options are those
-        of ``task``.
+        running, for at most the app's ``grace``. ``queue``, ``max_attempts``,
+        ``timeout`` and ``backoff`` are those of ``task``; periodic jobs have
+        priority 0.
         """
         check_schedule(cron, every, timezone)
 

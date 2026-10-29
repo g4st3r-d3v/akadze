@@ -123,7 +123,8 @@ class Worker:
 
     ``slots`` is how many jobs run at once per queue. Liveness is a heartbeat
     every ``heartbeat_interval``; a worker whose heartbeat is older than
-    ``heartbeat_ttl`` is presumed dead and its jobs are requeued by others.
+    ``heartbeat_ttl`` is presumed dead: another worker requeues its jobs,
+    spending an attempt with the default backoff (``failed`` on the last one).
     An idle worker polls about every ``poll_interval``. On stop it waits up to
     ``shutdown_timeout`` for running jobs, then returns the rest to the queue
     without spending an attempt. ``fair=True`` shares slots across

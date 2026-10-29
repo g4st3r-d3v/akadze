@@ -66,7 +66,8 @@ class Task(Generic[P]):
         ``delay`` or ``run_at`` (timezone-aware) set the earliest start.
         ``priority`` and ``max_attempts`` override the task's defaults for
         these jobs. While a job with ``unique_key`` is queued or running,
-        another enqueue with that key raises ``DuplicateJob``. ``limit_key``
+        another enqueue with that key raises ``DuplicateJob``; keys are shared
+        across all tasks and queues. ``limit_key``
         names the limits that apply (see ``set_limit``). A job not started by
         ``expires_at`` is cancelled. ``meta`` is a small JSON object with
         string keys, at most 8 KiB, for filtering and hooks; not for arguments
@@ -120,8 +121,9 @@ class BoundTask(Generic[P]):
     async def enqueue(self, *args: P.args, **kwargs: P.kwargs) -> None:
         """Insert one job with these arguments (by name). Returns nothing.
 
-        Raises ``EnqueueError`` on invalid arguments or options and
-        ``DuplicateJob`` when ``unique_key`` is taken; neither inserts a row.
+        Raises ``AkadzeError`` for positional arguments, ``EnqueueError`` on
+        invalid arguments or options and ``DuplicateJob`` when ``unique_key``
+        is taken; none of them inserts a row.
         ``DuplicateJob`` does not abort the caller's transaction.
         """
         if args:
