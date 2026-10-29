@@ -30,6 +30,9 @@ theme:
         icon: material/weather-sunny
         name: Light mode
 
+validation:
+  anchors: warn
+
 markdown_extensions:
   - admonition
   - attr_list
@@ -47,6 +50,39 @@ markdown_extensions:
 
 plugins:
   - search
+  - autorefs:
+      resolve_closest: true
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: ru
+          name: Русский
+          build: true
+          site_description: Очередь задач на PostgreSQL для Python.
+          nav_translations:
+            Home: Главная
+            First task: Первая задача
+            Guides: Руководства
+            Tasks and the app: Задачи и приложение
+            Enqueue: Постановка в очередь
+            Retries, cancel and completion: Ретраи, отмена и завершение
+            Periodic schedules: Расписания
+            Limits and fair claim: Лимиты и fair claim
+            Testing: Тестирование
+            Deploy and operate: Деплой и эксплуатация
+            Moving from Celery: Переезд с Celery
+            Concepts: Как это устроено
+            Delivery and the worker: Доставка и воркер
+            How a claim works: Как работает claim
+            Reference: Справочник
+            Job states: Состояния задания
   - mkdocstrings:
       handlers:
         python:

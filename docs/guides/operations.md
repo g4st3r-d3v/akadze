@@ -52,4 +52,4 @@ The worker deletes finished jobs (`succeeded`, `failed`, `cancelled`) and period
 
 ## Worker and database errors
 
-A transient database error (restart, failover, dropped connection, deadlock) is logged and retried with backoff; the worker keeps running and does not claim while its heartbeat fails. Other database errors, such as a schema that was not migrated, stop it. See [Delivery and the worker](../concepts/delivery.md).
+Since 0.6.0, a transient database error (restart, failover, dropped connection, deadlock) is logged and retried with backoff; the worker keeps running and does not claim while its heartbeat fails. Other database errors, such as a schema that was not migrated, stop it. See [Delivery and the worker](../concepts/delivery.md).
