@@ -43,5 +43,6 @@ pip install akadze
 
 - Впервые здесь: [Первая задача](first-task.md), затем запускаемый [пример с FastAPI](examples.md).
 - Переезжаете с Celery: [Переезд с Celery](guides/celery.md).
+- Как она выглядит по скорости рядом с другими: [Бенчмарк](benchmark.md).
 - Запускаете в проде: [Деплой и эксплуатация](guides/operations.md) и [Доставка и воркер](concepts/delivery.md).
 - Заметки о дизайне и решения — в [akadze-harness](https://github.com/g4st3r-d3v/akadze-harness).
