@@ -12,6 +12,7 @@ app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
 | Option | Default | Meaning |
 |---|---|---|
 | `database_url` or `engine` | — | One is required. With `database_url` the app builds an async engine and owns it; pass your own `engine` to share a pool |
+| `pool_size` | SQLAlchemy's 5 | Pool size of the engine built from `database_url`, plus 10 overflow; not allowed with `engine`. See [Connection pool](operations.md#connection-pool) |
 | `grace` | 1 minute | How late a periodic fire may still be enqueued |
 | `retention` | 7 days | Finished jobs and periodic runs older than this are deleted by the worker |
 
