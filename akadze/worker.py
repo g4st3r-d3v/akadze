@@ -101,14 +101,15 @@ def _as_datetime(value: object) -> datetime:
     raise TypeError("worker timestamp must be a datetime")
 
 
-def _warn_small_pool(engine: AsyncEngine, runs: int) -> None:
+def _warn_small_pool(engine: AsyncEngine, runs: int, *, owned: bool) -> None:
     """Warn when the engine's pool cannot give every run its own connection.
 
     Each run holds a connection to start and another to record its outcome,
     one at a time; the loop and the heartbeat need one each. That is a lower
     bound: task bodies and a web app sharing the engine take more. With fewer,
     runs wait on the pool: the default pool (5 + 10 overflow) slows a worker
-    with 20 slots by more than half.
+    with 20 slots by more than half. ``owned`` is whether the app built the
+    engine, which decides the hint: ``pool_size`` or the caller's own engine.
     """
 
     pool = engine.pool
@@ -124,12 +125,14 @@ def _warn_small_pool(engine: AsyncEngine, runs: int) -> None:
     if capacity < needed:
         logger.warning(
             "engine pool holds %d connections (pool_size %d + max_overflow %d); "
-            "this worker needs at least %d (slots x queues + 2), so runs will wait for one; "
-            "pass Akadze(pool_size=...) or size your own engine's pool",
+            "this worker needs at least %d (slots x queues + 2), so runs will wait for one; %s",
             capacity,
             pool.size(),
             overflow,
             needed,
+            "pass Akadze(pool_size=...)"
+            if owned
+            else "size the pool of the engine passed to Akadze",
         )
 
 
@@ -322,7 +325,9 @@ class Worker:
         retried with backoff; any other error stops the worker.
         """
 
-        _warn_small_pool(self.app.engine, self.slots * len(self.queues))
+        _warn_small_pool(
+            self.app.engine, self.slots * len(self.queues), owned=self.app._owns_engine
+        )
         await self.register()
         self._last_heartbeat_ok = time.monotonic()
         loop = asyncio.create_task(self._loop(stop))

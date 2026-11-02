@@ -5,9 +5,10 @@ import time
 from datetime import timedelta
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from akadze import Akadze
-from akadze.schema import migrate
+from akadze import Akadze, migrate
+from akadze.schema import async_database_url
 from akadze.worker import Worker, poll_delay
 from tests.factories import age_worker_heartbeat, bump_run_count
 from tests.pg import as_json, connection, job_row, job_rows
@@ -408,44 +409,43 @@ async def test_a_freed_slot_is_refilled_without_waiting_for_the_poll(
         await serving
 
 
-@pytest.mark.parametrize(
-    ("slots", "warns"),
-    [(13, False), (14, True)],
-    ids=["fits-5+10", "needs-16"],
-)
-async def test_serve_warns_when_the_pool_is_smaller_than_the_slots(
-    app: Akadze, caplog: pytest.LogCaptureFixture, slots: int, warns: bool
-) -> None:
-    # Arrange — the default pool holds 5 + 10; a worker needs slots + 2
-    worker = Worker(app, slots=slots, heartbeat_interval=timedelta(hours=1))
-    stop = asyncio.Event()
-    stop.set()
-
-    # Act
-    await worker.serve(stop)
-
-    # Assert
-    warnings = [
+def _pool_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
         record.getMessage()
         for record in caplog.records
         if record.levelname == "WARNING" and "engine pool" in record.getMessage()
     ]
-    expected = (
-        "engine pool holds 15 connections (pool_size 5 + max_overflow 10); "
-        f"this worker needs at least {slots + 2} (slots x queues + 2), "
-        "so runs will wait for one; "
-        "pass Akadze(pool_size=...) or size your own engine's pool"
-    )
-    assert warnings == ([expected] if warns else [])
 
 
-async def test_serve_does_not_warn_when_pool_size_covers_the_slots(
-    database_url: str, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("pool_size", "slots", "expected"),
+    [
+        (None, 13, None),
+        (
+            None,
+            14,
+            "holds 15 connections (pool_size 5 + max_overflow 10); this worker needs at least 16",
+        ),
+        (12, 20, None),
+        (
+            11,
+            20,
+            "holds 21 connections (pool_size 11 + max_overflow 10); this worker needs at least 22",
+        ),
+    ],
+    ids=["default-fits", "default-short", "sized-fits", "sized-short"],
+)
+async def test_serve_warns_when_the_pool_is_smaller_than_the_slots(
+    database_url: str,
+    caplog: pytest.LogCaptureFixture,
+    pool_size: int | None,
+    slots: int,
+    expected: str | None,
 ) -> None:
-    # Arrange — 20 slots need 22 connections; 12 + 10 overflow is enough
+    # Arrange — a worker needs slots + 2 connections; overflow is 10
     await migrate(database_url)
-    app = Akadze(database_url=database_url, pool_size=12)
-    worker = Worker(app, slots=20, heartbeat_interval=timedelta(hours=1))
+    app = Akadze(database_url=database_url, pool_size=pool_size)
+    worker = Worker(app, slots=slots, heartbeat_interval=timedelta(hours=1))
     stop = asyncio.Event()
     stop.set()
 
@@ -456,8 +456,38 @@ async def test_serve_does_not_warn_when_pool_size_covers_the_slots(
         await app.aclose()
 
     # Assert
-    assert not [
-        record
-        for record in caplog.records
-        if record.levelname == "WARNING" and "engine pool" in record.getMessage()
+    assert _pool_warnings(caplog) == (
+        []
+        if expected is None
+        else [
+            f"engine pool {expected} (slots x queues + 2), so runs will wait for one; "
+            "pass Akadze(pool_size=...)"
+        ]
+    )
+
+
+async def test_serve_warning_points_a_shared_engine_at_its_own_pool(
+    database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange — the caller's engine has the default 5 + 10 pool
+    await migrate(database_url)
+    engine = create_async_engine(
+        async_database_url(database_url), connect_args={"statement_cache_size": 0}
+    )
+    app = Akadze(engine=engine)
+    worker = Worker(app, slots=14, heartbeat_interval=timedelta(hours=1))
+    stop = asyncio.Event()
+    stop.set()
+
+    # Act
+    try:
+        await worker.serve(stop)
+    finally:
+        await engine.dispose()
+
+    # Assert
+    assert _pool_warnings(caplog) == [
+        "engine pool holds 15 connections (pool_size 5 + max_overflow 10); "
+        "this worker needs at least 16 (slots x queues + 2), so runs will wait for one; "
+        "size the pool of the engine passed to Akadze"
     ]

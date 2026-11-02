@@ -68,12 +68,13 @@ class Akadze:
     ) -> None:
         if engine is None and database_url is None:
             raise AkadzeError("Akadze needs an engine or a database_url")
+        sizing: dict[str, int] = {}
         if pool_size is not None:
             if engine is not None:
                 raise AkadzeError("pool_size applies only to the engine built from database_url")
-            if pool_size < 1:
-                raise AkadzeError("pool_size must be at least 1")
-        sizing: dict[str, Any] = {} if pool_size is None else {"pool_size": pool_size}
+            if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
+                raise AkadzeError("pool_size must be an int of at least 1")
+            sizing["pool_size"] = pool_size
         self.engine = engine or create_async_engine(
             async_database_url(database_url or ""),
             connect_args={"statement_cache_size": 0},

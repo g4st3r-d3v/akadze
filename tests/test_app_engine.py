@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -8,28 +10,16 @@ from akadze import Akadze, AkadzeError
 URL = "postgresql://unused/akadze"
 
 
-async def test_pool_size_sets_the_pool_of_the_built_engine() -> None:
-    # Arrange
-    app = Akadze(database_url=URL, pool_size=25)
-
+@pytest.mark.parametrize(("pool_size", "expected"), [(25, 25), (None, 5)], ids=["sized", "default"])
+async def test_the_built_engine_gets_the_pool_size(pool_size: int | None, expected: int) -> None:
     # Act
-    size = app.engine.pool.size()  # type: ignore[attr-defined]
+    app = Akadze(database_url=URL, pool_size=pool_size)
 
     # Assert
-    assert size == 25
-    await app.aclose()
-
-
-async def test_without_pool_size_the_built_engine_keeps_the_default_pool() -> None:
-    # Arrange
-    app = Akadze(database_url=URL)
-
-    # Act
-    size = app.engine.pool.size()  # type: ignore[attr-defined]
-
-    # Assert
-    assert size == 5
-    await app.aclose()
+    try:
+        assert app.engine.pool.size() == expected  # type: ignore[attr-defined]
+    finally:
+        await app.aclose()
 
 
 async def test_pool_size_with_an_engine_raises() -> None:
@@ -37,15 +27,17 @@ async def test_pool_size_with_an_engine_raises() -> None:
     engine = create_async_engine("postgresql+asyncpg://unused/akadze")
 
     # Act / Assert
-    with pytest.raises(
-        AkadzeError, match="pool_size applies only to the engine built from database_url"
-    ):
-        Akadze(engine=engine, pool_size=25)
-    await engine.dispose()
+    try:
+        with pytest.raises(
+            AkadzeError, match="pool_size applies only to the engine built from database_url"
+        ):
+            Akadze(engine=engine, pool_size=25)
+    finally:
+        await engine.dispose()
 
 
-@pytest.mark.parametrize("pool_size", [0, -1])
-def test_pool_size_below_one_raises(pool_size: int) -> None:
+@pytest.mark.parametrize("pool_size", [0, -1, True, 2.5, "25"])
+def test_pool_size_that_is_not_a_positive_int_raises(pool_size: Any) -> None:
     # Act / Assert
-    with pytest.raises(AkadzeError, match="pool_size must be at least 1"):
+    with pytest.raises(AkadzeError, match="pool_size must be an int of at least 1"):
         Akadze(database_url=URL, pool_size=pool_size)
