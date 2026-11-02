@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 
 from akadze import Akadze
+from akadze.schema import migrate
 from akadze.worker import Worker, poll_delay
 from tests.factories import age_worker_heartbeat, bump_run_count
 from tests.pg import as_json, connection, job_row, job_rows
@@ -432,6 +433,31 @@ async def test_serve_warns_when_the_pool_is_smaller_than_the_slots(
     expected = (
         "engine pool holds 15 connections (pool_size 5 + max_overflow 10); "
         f"this worker needs at least {slots + 2} (slots x queues + 2), "
-        "so runs will wait for one"
+        "so runs will wait for one; "
+        "pass Akadze(pool_size=...) or size your own engine's pool"
     )
     assert warnings == ([expected] if warns else [])
+
+
+async def test_serve_does_not_warn_when_pool_size_covers_the_slots(
+    database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange — 20 slots need 22 connections; 12 + 10 overflow is enough
+    await migrate(database_url)
+    app = Akadze(database_url=database_url, pool_size=12)
+    worker = Worker(app, slots=20, heartbeat_interval=timedelta(hours=1))
+    stop = asyncio.Event()
+    stop.set()
+
+    # Act
+    try:
+        await worker.serve(stop)
+    finally:
+        await app.aclose()
+
+    # Assert
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING" and "engine pool" in record.getMessage()
+    ]

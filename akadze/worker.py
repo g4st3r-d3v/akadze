@@ -124,7 +124,8 @@ def _warn_small_pool(engine: AsyncEngine, runs: int) -> None:
     if capacity < needed:
         logger.warning(
             "engine pool holds %d connections (pool_size %d + max_overflow %d); "
-            "this worker needs at least %d (slots x queues + 2), so runs will wait for one",
+            "this worker needs at least %d (slots x queues + 2), so runs will wait for one; "
+            "pass Akadze(pool_size=...) or size your own engine's pool",
             capacity,
             pool.size(),
             overflow,

@@ -37,6 +37,11 @@ class Akadze:
     instead to share a pool; the app then leaves it open. One of the two is
     required.
 
+    ``pool_size`` sets the pool of the engine the app builds (SQLAlchemy's
+    default is 5, plus 10 overflow). A worker needs at least
+    ``slots x queues + 2`` connections. With your own ``engine``, size its
+    pool there instead.
+
     ``grace`` is how late a periodic fire may still be enqueued (default one
     minute). ``retention`` is how long finished jobs and periodic runs are
     kept before the worker deletes them (default seven days). Keep
@@ -45,7 +50,7 @@ class Akadze:
 
     Example:
         ```python
-        app = Akadze(database_url="postgresql://localhost/app")
+        app = Akadze(database_url="postgresql://localhost/app", pool_size=25)
 
         @app.task("mail.send", queue="mail", max_attempts=6)
         async def send_mail(user_id: int) -> None: ...
@@ -57,14 +62,22 @@ class Akadze:
         *,
         engine: AsyncEngine | None = None,
         database_url: str | None = None,
+        pool_size: int | None = None,
         grace: timedelta = timedelta(minutes=1),
         retention: timedelta = timedelta(days=7),
     ) -> None:
         if engine is None and database_url is None:
             raise AkadzeError("Akadze needs an engine or a database_url")
+        if pool_size is not None:
+            if engine is not None:
+                raise AkadzeError("pool_size applies only to the engine built from database_url")
+            if pool_size < 1:
+                raise AkadzeError("pool_size must be at least 1")
+        sizing: dict[str, Any] = {} if pool_size is None else {"pool_size": pool_size}
         self.engine = engine or create_async_engine(
             async_database_url(database_url or ""),
             connect_args={"statement_cache_size": 0},
+            **sizing,
         )
         self._owns_engine = engine is None
         self.grace = grace

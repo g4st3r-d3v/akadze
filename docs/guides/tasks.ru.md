@@ -12,6 +12,7 @@ app = Akadze(database_url="postgresql://akadze:akadze@localhost:5432/akadze")
 | Параметр | По умолчанию | Смысл |
 |---|---|---|
 | `database_url` или `engine` | — | Нужен один из двух. С `database_url` приложение само создаёт async engine и владеет им; передайте свой `engine`, чтобы делить пул |
+| `pool_size` | 5, как в SQLAlchemy | Размер пула engine, который создаётся из `database_url`, плюс 10 overflow; с `engine` не передаётся. См. [Пул соединений](operations.md#connection-pool) |
 | `grace` | 1 минута | Насколько поздно периодический запуск ещё можно поставить в очередь |
 | `retention` | 7 дней | Завершённые задания и запуски расписаний старше этого воркер удаляет |
 
