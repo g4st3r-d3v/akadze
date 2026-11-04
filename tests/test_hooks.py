@@ -193,5 +193,33 @@ async def test_transition_hook_error_on_a_cancel_fails_the_job_with_the_reason(
     assert row is not None
     assert row["state"] == "failed"
     assert as_json(row["errors"])[-1]["message"] == (
-        "outcome could not be recorded: RuntimeError: no cancels"
+        "outcome could not be recorded: RuntimeError: no cancels; the run raised RuntimeError"
+    )
+
+
+async def test_transition_hook_error_keeps_the_run_error_in_the_reason(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        raise ValueError("bad input")
+
+    def reject_retry(connection: object, job: object, from_state: str, to_state: str) -> None:
+        if (from_state, to_state) == ("running", "queued"):
+            raise RuntimeError("no retries")
+
+    app.hooks.on_transition.append(reject_retry)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "failed"
+    assert as_json(row["errors"])[-1]["message"] == (
+        "outcome could not be recorded: RuntimeError: no retries; the run raised ValueError"
     )

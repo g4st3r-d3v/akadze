@@ -28,7 +28,8 @@ class Hooks:
     failed with the error, without another attempt, and ``on_transition``
     runs again for that change. If it raises again, the worker stops and the
     job stays running; once the heartbeat expires, rescue requeues it,
-    spending an attempt, and calls ``on_transition`` too. Append to the lists.
+    spending an attempt (``failed`` on the last one), and calls
+    ``on_transition`` too. Append to the lists.
     """
 
     def __init__(self) -> None:

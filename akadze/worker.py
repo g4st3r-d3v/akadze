@@ -304,7 +304,8 @@ class Worker:
 
         Raises what would stop ``serve``: an outcome that could not be written
         even as ``failed`` leaves its job running, and another step would run
-        the body again.
+        the body again. A step registers no worker row, so rescue does not
+        see that job: requeue it by hand.
         """
 
         started = await self._spawn()
@@ -626,6 +627,8 @@ class Worker:
                 # The only user code in this transaction: an on_transition hook.
                 # The body may have run to the end, so the job fails, not retries.
                 reason = f"outcome could not be recorded: {_describe(error)}"
+                if exc is not None:
+                    reason += f"; the run raised {_kind(exc)}"
                 await self._record_failed(job, error, reason, policy, honor_cancel=False)
                 return
 
@@ -640,30 +643,47 @@ class Worker:
     ) -> None:
         """Fail the job, hooks included; if that fails too, stop the worker."""
 
-        try:
-            await _finish(
-                self.app.engine,
-                self.app.hooks,
-                job,
-                Fail(reason),
-                None,
-                policy,
-                honor_cancel=honor_cancel,
-            )
-        except Exception as again:
-            self._fatal = again
-            self._stuck.add(job.id)
-            # Type names only: hook messages may carry job arguments.
-            logger.error(
-                "job %s outcome not recorded (%s, then %s); stopping the worker, "
-                "the job is left running for rescue",
-                job.id,
-                _kind(first),
-                _kind(again),
-            )
-        else:
-            self._freed(job)
-            logger.warning("job %s failed: outcome not recorded (%s)", job.id, _kind(first))
+        failures = 0
+        while True:
+            try:
+                await _finish(
+                    self.app.engine,
+                    self.app.hooks,
+                    job,
+                    Fail(reason),
+                    None,
+                    policy,
+                    honor_cancel=honor_cancel,
+                )
+            except DB_ERRORS as again:
+                if not is_transient_db_error(again) or self._stale():
+                    self._stop_on(job, first, again)
+                    return
+                failures += 1
+                await asyncio.sleep(
+                    max(min(self._error_delay(failures), self._heartbeat_left()), 0.0)
+                )
+            except Exception as again:
+                self._stop_on(job, first, again)
+                return
+            else:
+                self._freed(job)
+                logger.warning("job %s failed: outcome not recorded (%s)", job.id, _kind(first))
+                return
+
+    def _stop_on(self, job: Job, first: BaseException, again: BaseException) -> None:
+        """Stop the worker; the job stays running until rescue."""
+
+        self._fatal = again
+        self._stuck.add(job.id)
+        # Type names only: hook messages may carry job arguments.
+        logger.error(
+            "job %s outcome not recorded (%s, then %s); stopping the worker, "
+            "the job is left running for rescue",
+            job.id,
+            _kind(first),
+            _kind(again),
+        )
 
     async def _invoke(self, job: Job) -> object:
         try:
@@ -717,13 +737,14 @@ def _kind(error: BaseException) -> str:
 def _describe(error: BaseException) -> str:
     """``_kind`` plus a cleaned message, for the job's stored errors."""
 
+    kind = _kind(error)
     if isinstance(error, DB_ERRORS):
-        return public_db_error(error)
+        return kind
     try:
         message = _message(error)
     except Exception:  # a __str__ that raises
         message = ""
-    return f"{type(error).__name__}: {message}" if message else type(error).__name__
+    return f"{kind}: {message}" if message else kind
 
 
 async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> None:
