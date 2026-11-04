@@ -163,7 +163,9 @@ class Worker:
     ``heartbeat_ttl`` is presumed dead: another worker requeues its jobs,
     spending an attempt with the default backoff (``failed`` on the last one).
     An idle worker polls about every ``poll_interval``; a worker whose slots
-    are all taken claims again as soon as one of those runs ends. On stop it
+    are all taken claims again as soon as one of those runs ends. A queued job
+    whose cancel was requested, or that expired, is closed within about one
+    ``poll_interval`` (a claim never takes it). On stop it
     waits up to ``shutdown_timeout`` for running jobs, then returns the rest to
     the queue without spending an attempt. ``fair=True`` shares slots across
     ``limit_key`` groups within a priority instead of taking the oldest jobs.
@@ -203,6 +205,10 @@ class Worker:
         self._fatal: BaseException | None = None
         self._draining = False
         self._last_claim_full = False
+        # The cancel step reads every queued job of the queue, and a claim skips
+        # those it would close anyway, so the serve loop runs it once per poll
+        # interval rather than on every claim.
+        self._next_cancel = 0.0
         # Set when a run of a queue with every slot taken writes its outcome. The
         # pause waits on it, not on the poll interval, so the slot is refilled at
         # once. Made per claim, so it belongs to the running loop.
@@ -258,13 +264,16 @@ class Worker:
         self._last_heartbeat_ok = started
 
     async def claim_available(self) -> None:
-        """Claim up to the free slots, one transaction per queue.
+        """Cancel the due cancels, then claim up to the free slots, one transaction per queue.
 
         Each transaction closes before a task runs. A transaction per queue keeps
         the limits locks of one queue from being held while another queue's claim
         waits for its own, so workers with different queue orders cannot deadlock.
         """
 
+        await self._claim(cancel=True)
+
+    async def _claim(self, *, cancel: bool) -> None:
         full = False
         taken: set[str] = set()
         self._last_claim_full = False
@@ -272,7 +281,8 @@ class Worker:
         tasks = list(self.app.tasks)
         for queue in self.queues:
             async with self.app.engine.begin() as connection:
-                await _cancel_due(connection, self.app.hooks, queue)
+                if cancel:
+                    await _cancel_due(connection, self.app.hooks, queue)
                 busy = await count_running(connection, self.id, queue)
                 limit = self.slots - busy
                 claimed = await claim_queue(
@@ -302,8 +312,14 @@ class Worker:
         if started:
             await asyncio.gather(*started)
 
-    async def _spawn(self) -> list[asyncio.Task[None]]:
-        await self.claim_available()
+    async def _spawn(self, *, throttle_cancel: bool = False) -> list[asyncio.Task[None]]:
+        cancel = True
+        if throttle_cancel:
+            now = time.monotonic()
+            cancel = now >= self._next_cancel
+            if cancel:
+                self._next_cancel = now + self.poll_interval.total_seconds()
+        await self._claim(cancel=cancel)
         async with self.app.engine.connect() as connection:
             jobs = await running_jobs(connection, self.id)
         started: list[asyncio.Task[None]] = []
@@ -403,7 +419,7 @@ class Worker:
             if self._heartbeat_failing:
                 ok = False
             else:
-                ok &= await self._step("claim", self._spawn)
+                ok &= await self._step("claim", partial(self._spawn, throttle_cancel=True))
             if not ok:
                 failures += 1
                 await self._wait(stop, self._error_delay(failures))

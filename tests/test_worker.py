@@ -5,9 +5,11 @@ import time
 from datetime import timedelta
 
 import pytest
+from pytest_mock import MockerFixture
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from akadze import Akadze, migrate
+from akadze import worker as worker_module
 from akadze.schema import async_database_url
 from akadze.worker import Worker, poll_delay
 from tests.factories import age_worker_heartbeat, bump_run_count
@@ -281,17 +283,17 @@ async def test_claim_full_flag(app: Akadze, slots: int, job_count: int, expect_f
 
 async def _claims_until_pause(worker: Worker) -> int:
     claims = 0
-    claim = worker.claim_available
+    claim = worker._claim
 
-    async def count() -> None:
+    async def count(*, cancel: bool) -> None:
         nonlocal claims
         claims += 1
-        await claim()
+        await claim(cancel=cancel)
 
     async def stop_on_pause(stop: asyncio.Event) -> None:
         stop.set()
 
-    worker.claim_available = count  # type: ignore[method-assign]
+    worker._claim = count  # type: ignore[method-assign]
     worker._pause = stop_on_pause  # type: ignore[method-assign]
     await worker.serve(asyncio.Event())
     return claims
@@ -491,3 +493,19 @@ async def test_serve_warning_points_a_shared_engine_at_its_own_pool(
         "this worker needs at least 16 (slots x queues + 2), so runs will wait for one; "
         "size the pool of the engine passed to Akadze"
     ]
+
+
+async def test_serve_loop_runs_the_cancel_step_once_per_poll_interval(
+    app: Akadze, mocker: MockerFixture
+) -> None:
+    # Arrange
+    spy = mocker.spy(worker_module, "_cancel_due")
+    worker = Worker(app, poll_interval=timedelta(hours=1))
+
+    # Act
+    await worker._spawn(throttle_cancel=True)
+    await worker._spawn(throttle_cancel=True)
+    await worker.claim_available()
+
+    # Assert — the second loop pass skips it; a direct claim always cancels
+    assert spy.call_count == 2
