@@ -1,6 +1,10 @@
 # akadze
 
 [![ci](https://github.com/g4st3r-d3v/akadze/actions/workflows/ci.yml/badge.svg)](https://github.com/g4st3r-d3v/akadze/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/akadze)](https://pypi.org/project/akadze/)
+[![Python](https://img.shields.io/pypi/pyversions/akadze)](https://pypi.org/project/akadze/)
+[![License: MIT](https://img.shields.io/pypi/l/akadze)](https://github.com/g4st3r-d3v/akadze/blob/main/LICENSE)
+[![Docs](https://img.shields.io/badge/docs-EN%20%7C%20RU-blue)](https://g4st3r-d3v.github.io/akadze/)
 
 Postgres-backed task queue: enqueue work and run it in a worker. Periodic schedules run in that same process.
 

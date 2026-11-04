@@ -10,13 +10,31 @@ repository = "https://github.com/g4st3r-d3v/akadze"
 documentation = "https://g4st3r-d3v.github.io/akadze/"
 packages = [{ include = "akadze" }]
 include = ["akadze/sql/*.sql"]
-keywords = ["postgres", "queue", "worker", "tasks"]
+keywords = [
+  "postgres",
+  "postgresql",
+  "task-queue",
+  "job-queue",
+  "background-jobs",
+  "worker",
+  "asyncio",
+  "cron",
+  "skip-locked",
+  "celery-alternative",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
   "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Distributed Computing",
+  "Typing :: Typed",
 ]
 
 [tool.poetry.dependencies]
