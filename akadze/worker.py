@@ -296,11 +296,18 @@ class Worker:
         return tuple(self._inflight.values())
 
     async def step(self) -> None:
-        """Claim and wait until those runs finish."""
+        """Claim and wait until those runs finish.
+
+        Raises what would stop ``serve``: an outcome that could not be written
+        even as ``failed`` leaves its job running, and another step would run
+        the body again.
+        """
 
         started = await self._spawn()
         if started:
             await asyncio.gather(*started)
+        if self._fatal is not None:
+            raise self._fatal
 
     async def _spawn(self) -> list[asyncio.Task[None]]:
         await self.claim_available()
@@ -567,9 +574,10 @@ class Worker:
 
         A transient database error is retried while the heartbeat is fresh, so
         the claim loop does not run the job again. Once the heartbeat is stale
-        the job is left for rescue. Any other error (the outcome cannot be
-        stored) fails the job without another attempt, since the body may have
-        succeeded; if even that fails, the worker stops.
+        the job is left for rescue. Any other database error (the outcome
+        cannot be stored), or an ``on_transition`` hook that raises, fails the
+        job without another attempt, since the body may have succeeded; if
+        even that fails, the worker stops.
         """
 
         failures = 0
@@ -580,7 +588,8 @@ class Worker:
                 return
             except DB_ERRORS as error:
                 if not is_transient_db_error(error):
-                    await self._record_unstorable(job, error, policy, returned=exc is None)
+                    reason = f"outcome could not be stored: {public_db_error(error)}"
+                    await self._record_failed(job, reason, policy, returned=exc is None)
                     return
                 failures += 1
                 if self._stale():
@@ -596,33 +605,40 @@ class Worker:
                 await asyncio.sleep(
                     max(min(self._error_delay(failures), self._heartbeat_left()), 0.0)
                 )
+            except Exception as error:
+                # The only user code in this transaction: an on_transition hook.
+                reason = f"outcome could not be recorded: {type(error).__name__}: {error}"
+                await self._record_failed(job, reason, policy, returned=exc is None)
+                return
 
-    async def _record_unstorable(
-        self, job: Job, error: BaseException, policy: BackoffPolicy | None, *, returned: bool
+    async def _record_failed(
+        self, job: Job, reason: str, policy: BackoffPolicy | None, *, returned: bool
     ) -> None:
-        """Fail the job. A body that returned is not turned into a cancel: it ran."""
+        """Fail the job, hooks included. A body that returned is not turned into a cancel."""
 
-        reason = Fail(f"outcome could not be stored: {public_db_error(error)}")
         try:
             await _finish(
                 self.app.engine,
                 self.app.hooks,
                 job,
-                reason,
+                Fail(reason),
                 None,
                 policy,
                 honor_cancel=not returned,
             )
-        except DB_ERRORS as again:
+        except Exception as again:
             self._fatal = again
+            detail = (
+                public_db_error(again)
+                if isinstance(again, DB_ERRORS)
+                else f"{type(again).__name__}: {again}"
+            )
             logger.error(
-                "job %s outcome could not be stored; stopping the worker: %s",
-                job.id,
-                public_db_error(again),
+                "job %s outcome not recorded (%s); stopping the worker: %s", job.id, reason, detail
             )
         else:
             self._freed(job)
-            logger.warning("job %s outcome could not be stored: %s", job.id, public_db_error(error))
+            logger.warning("job %s failed: %s", job.id, reason)
 
     async def _invoke(self, job: Job) -> object:
         try:
