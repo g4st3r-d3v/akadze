@@ -23,9 +23,13 @@ class Hooks:
     after it returns, inside its timeout; an error there counts as a failed
     run. ``on_transition(connection, job, from_state, to_state)`` runs in the
     transaction in which enqueue, a worker or a rescue changes the job's
-    state; ``requeue`` does not call it. It must not raise: an error rolls the
-    transition back, and the job stays running on its worker. Append to the
-    lists.
+    state; ``requeue`` does not call it. An error there rolls that
+    transition back. When a worker records a run's outcome, the job is then
+    failed with the error, without another attempt, and ``on_transition``
+    runs again for that change. If it raises again, the worker stops and the
+    job stays running; once the heartbeat expires, rescue requeues it,
+    spending an attempt (``failed`` on the last one), and calls
+    ``on_transition`` too. Append to the lists.
     """
 
     def __init__(self) -> None:
