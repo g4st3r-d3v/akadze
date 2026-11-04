@@ -35,7 +35,7 @@ from akadze.job import (
     running_jobs,
 )
 from akadze.maintenance import prune, rescue
-from akadze.outcome import BackoffPolicy, decide, push_error
+from akadze.outcome import BackoffPolicy, _message, decide, push_error
 from akadze.periodic import schedule_due
 from akadze.ready import to_cancel
 from akadze.schema import DB_ERRORS, is_transient_db_error, public_db_error
@@ -201,6 +201,10 @@ class Worker:
         self._abandon = False
         self._heartbeat_failing = False
         self._fatal: BaseException | None = None
+        # Jobs whose outcome could not be written even as failed. They stay
+        # running for rescue, which spends an attempt: shutdown must not
+        # release them, and the claim pass must not start them again.
+        self._stuck: set[int] = set()
         self._draining = False
         self._last_claim_full = False
         # Set when a run of a queue with every slot taken writes its outcome. The
@@ -310,12 +314,16 @@ class Worker:
             raise self._fatal
 
     async def _spawn(self) -> list[asyncio.Task[None]]:
+        if self._fatal is not None:
+            raise self._fatal
         await self.claim_available()
         async with self.app.engine.connect() as connection:
             jobs = await running_jobs(connection, self.id)
+        if self._fatal is not None:
+            raise self._fatal
         started: list[asyncio.Task[None]] = []
         for job in jobs:
-            if job.id in self._inflight:
+            if job.id in self._inflight or job.id in self._stuck:
                 continue
             task = asyncio.create_task(self._execute(job))
             self._inflight[job.id] = task
@@ -479,7 +487,12 @@ class Worker:
             return
 
     async def shutdown(self) -> None:
-        """Return unfinished jobs to the queue without spending an attempt."""
+        """Return unfinished jobs to the queue without spending an attempt.
+
+        A job whose outcome could not be written stays running, and so does
+        this worker's row: rescue requeues the job once the heartbeat expires,
+        spending an attempt.
+        """
 
         if not self._abandon:
             await self._drain_inflight()
@@ -491,11 +504,13 @@ class Worker:
         try:
             async with asyncio.timeout(self.heartbeat_ttl.total_seconds()):
                 async with self.app.engine.begin() as connection:
-                    await _release(connection, self.app.hooks, self.id)
-                    await connection.execute(
-                        text("DELETE FROM akadze.workers WHERE id = :id"),
-                        {"id": self.id},
-                    )
+                    await _release(connection, self.app.hooks, self.id, keep=self._stuck)
+                    if not self._stuck:
+                        # Kept otherwise: rescue finds stuck jobs by this row going stale.
+                        await connection.execute(
+                            text("DELETE FROM akadze.workers WHERE id = :id"),
+                            {"id": self.id},
+                        )
         except DB_ERRORS as exc:
             logger.warning(
                 "worker %s could not release its jobs; another worker will rescue them: %s",
@@ -588,8 +603,10 @@ class Worker:
                 return
             except DB_ERRORS as error:
                 if not is_transient_db_error(error):
-                    reason = f"outcome could not be stored: {public_db_error(error)}"
-                    await self._record_failed(job, reason, policy, returned=exc is None)
+                    reason = f"outcome could not be stored: {_describe(error)}"
+                    await self._record_failed(
+                        job, error, reason, policy, honor_cancel=exc is not None
+                    )
                     return
                 failures += 1
                 if self._stale():
@@ -607,14 +624,21 @@ class Worker:
                 )
             except Exception as error:
                 # The only user code in this transaction: an on_transition hook.
-                reason = f"outcome could not be recorded: {type(error).__name__}: {error}"
-                await self._record_failed(job, reason, policy, returned=exc is None)
+                # The body may have run to the end, so the job fails, not retries.
+                reason = f"outcome could not be recorded: {_describe(error)}"
+                await self._record_failed(job, error, reason, policy, honor_cancel=False)
                 return
 
     async def _record_failed(
-        self, job: Job, reason: str, policy: BackoffPolicy | None, *, returned: bool
+        self,
+        job: Job,
+        first: BaseException,
+        reason: str,
+        policy: BackoffPolicy | None,
+        *,
+        honor_cancel: bool,
     ) -> None:
-        """Fail the job, hooks included. A body that returned is not turned into a cancel."""
+        """Fail the job, hooks included; if that fails too, stop the worker."""
 
         try:
             await _finish(
@@ -624,21 +648,22 @@ class Worker:
                 Fail(reason),
                 None,
                 policy,
-                honor_cancel=not returned,
+                honor_cancel=honor_cancel,
             )
         except Exception as again:
             self._fatal = again
-            detail = (
-                public_db_error(again)
-                if isinstance(again, DB_ERRORS)
-                else f"{type(again).__name__}: {again}"
-            )
+            self._stuck.add(job.id)
+            # Type names only: hook messages may carry job arguments.
             logger.error(
-                "job %s outcome not recorded (%s); stopping the worker: %s", job.id, reason, detail
+                "job %s outcome not recorded (%s, then %s); stopping the worker, "
+                "the job is left running for rescue",
+                job.id,
+                _kind(first),
+                _kind(again),
             )
         else:
             self._freed(job)
-            logger.warning("job %s failed: %s", job.id, reason)
+            logger.warning("job %s failed: outcome not recorded (%s)", job.id, _kind(first))
 
     async def _invoke(self, job: Job) -> object:
         try:
@@ -683,6 +708,24 @@ class Worker:
             raise TimeoutError("timeout") from None
 
 
+def _kind(error: BaseException) -> str:
+    """What failed, without a message: a database error's class and SQLSTATE, else the type."""
+
+    return public_db_error(error) if isinstance(error, DB_ERRORS) else type(error).__name__
+
+
+def _describe(error: BaseException) -> str:
+    """``_kind`` plus a cleaned message, for the job's stored errors."""
+
+    if isinstance(error, DB_ERRORS):
+        return public_db_error(error)
+    try:
+        message = _message(error)
+    except Exception:  # a __str__ that raises
+        message = ""
+    return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
 async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> None:
     result = await connection.execute(
         text(
@@ -708,7 +751,9 @@ async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> 
         logger.info("job %s queued -> cancelled", job.id)
 
 
-async def _release(connection: AsyncConnection, hooks: Hooks, worker_id: UUID) -> None:
+async def _release(
+    connection: AsyncConnection, hooks: Hooks, worker_id: UUID, *, keep: set[int] | None = None
+) -> None:
     result = await connection.execute(
         text(
             f"""
@@ -717,11 +762,13 @@ async def _release(connection: AsyncConnection, hooks: Hooks, worker_id: UUID) -
                 worker_id = NULL,
                 started_at = NULL,
                 run_at = now()
-            WHERE worker_id = :worker_id AND state = 'running'
+            WHERE worker_id = :worker_id
+              AND state = 'running'
+              AND id <> ALL(CAST(:keep AS bigint[]))
             RETURNING {_COLUMNS}, false AS expired
             """
         ),
-        {"worker_id": worker_id},
+        {"worker_id": worker_id, "keep": sorted(keep or ())},
     )
     for row in result.mappings():
         job = job_from_mapping(row)

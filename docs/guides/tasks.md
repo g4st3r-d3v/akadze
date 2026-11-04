@@ -90,7 +90,7 @@ There is no global app and no `shared_task`.
 | `on_enqueue` | `(connection, job)` | in the enqueue transaction, once per job |
 | `before_run` | `(job)` | before the task body |
 | `after_run` | `(job)` | after the body returns, inside its timeout; an error here counts as a failed run: an attempt is spent and the whole body runs again on retry |
-| `on_transition` | `(connection, job, from_state, to_state)` | in the transaction that changes the state; an error rolls that change back. On a run's outcome the job is then failed with the error, without another attempt (the hook sees that change too); if the hook raises again, the worker stops and rescue picks the job up |
+| `on_transition` | `(connection, job, from_state, to_state)` | in the transaction that changes the state; an error rolls that change back. On a run's outcome the job is then failed with the error, without another attempt (the hook sees that change too); if the hook raises again, the worker stops and the job stays running until rescue requeues it after the heartbeat expires, spending an attempt (rescue calls the hook too) |
 
 ```python
 async def count(connection, job, from_state, to_state):

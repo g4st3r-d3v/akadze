@@ -8,7 +8,7 @@ import pytest
 from pytest_mock import MockerFixture
 from sqlalchemy import text
 
-from akadze import Akadze
+from akadze import Akadze, request_cancel
 from akadze.testing import drain
 from akadze.worker import Worker
 from tests.pg import as_json, connection, job_row, job_rows
@@ -143,7 +143,7 @@ async def test_transition_hook_that_always_raises_stops_the_worker(
         calls += 1
 
     def broken(connection: object, job: object, from_state: str, to_state: str) -> None:
-        if from_state == "running":
+        if to_state in ("succeeded", "failed"):
             raise RuntimeError("broken hook")
 
     app.hooks.on_transition.append(broken)
@@ -158,5 +158,40 @@ async def test_transition_hook_that_always_raises_stops_the_worker(
     # Assert
     row = await job_row(database_url, "demo")
     assert row is not None
-    assert row["state"] == "running"
+    assert (row["state"], row["attempt"], row["worker_id"]) == ("running", 0, worker.id)
     assert calls == 1
+    async with connection(database_url) as opened:
+        kept = await opened.fetchval("SELECT count(*) FROM akadze.workers WHERE id = $1", worker.id)
+    assert kept == 1
+
+
+async def test_transition_hook_error_on_a_cancel_fails_the_job_with_the_reason(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange — cancel arrives mid-run, the body raises, the hook rejects "cancelled"
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        row = await job_row(database_url, "demo")
+        assert row is not None
+        async with app.engine.begin() as session:
+            await request_cancel(session, row["id"])
+        raise RuntimeError("body")
+
+    def reject_cancel(connection: object, job: object, from_state: str, to_state: str) -> None:
+        if to_state == "cancelled":
+            raise RuntimeError("no cancels")
+
+    app.hooks.on_transition.append(reject_cancel)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "failed"
+    assert as_json(row["errors"])[-1]["message"] == (
+        "outcome could not be recorded: RuntimeError: no cancels"
+    )
