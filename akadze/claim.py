@@ -552,8 +552,8 @@ async def claim_queue(
     tasks: list[str],
     limit: int,
     fair: bool,
-) -> int:
-    """Claim up to limit ready jobs of queue in this transaction; return how many.
+) -> list[Job]:
+    """Claim up to limit ready jobs of queue in this transaction; return them.
 
     Plans from windows of the queue (see ``ClaimPlan``), then claims the plan.
     When other claimers hold planned rows, plans again without them, for
@@ -563,7 +563,7 @@ async def claim_queue(
     """
 
     if limit <= 0:
-        return 0
+        return []
     jobs: list[Job] = []
     locked: set[str] = set()
     held: list[int] = []
@@ -609,4 +609,4 @@ async def claim_queue(
     for job in jobs:
         await hooks.ran_transition(connection, job, "queued", "running")
         logger.info("job %s queued -> running", job.id)
-    return len(jobs)
+    return jobs

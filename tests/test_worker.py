@@ -491,3 +491,51 @@ async def test_serve_warning_points_a_shared_engine_at_its_own_pool(
         "this worker needs at least 16 (slots x queues + 2), so runs will wait for one; "
         "size the pool of the engine passed to Akadze"
     ]
+
+
+async def test_claim_counts_the_slots_it_already_holds(app: Akadze, database_url: str) -> None:
+    # Arrange — one slot, two ready jobs, one already claimed and not started
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+        await demo.using(session=session).enqueue()
+    worker = Worker(app, slots=1)
+    await worker.claim_available()
+
+    # Act
+    await worker.claim_available()
+
+    # Assert
+    states = sorted(row["state"] for row in await job_rows(database_url))
+    assert states == ["queued", "running"]
+
+
+async def test_step_runs_rows_a_failed_claim_may_have_committed(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange — the claim committed, but the worker did not learn which rows it took
+    calls = 0
+
+    @app.task("demo")
+    async def demo() -> None:
+        nonlocal calls
+        calls += 1
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(app)
+    await worker.claim_available()
+    worker._held.clear()
+    worker._reconcile = True
+
+    # Act
+    await worker.step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "succeeded"
+    assert calls == 1

@@ -29,7 +29,6 @@ from akadze.hooks import Hooks
 from akadze.job import (
     _COLUMNS,
     Job,
-    count_running,
     job_by_id,
     job_from_mapping,
     running_jobs,
@@ -197,6 +196,12 @@ class Worker:
         self.fair = fair
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
+        # Jobs this worker holds running: claimed and not started yet, in
+        # flight, or stuck. Slots are counted here, not with a query per claim.
+        self._held: dict[int, Job] = {}
+        # Set when a claim fails: its commit may have reached the database, so
+        # the next claim reads this worker's running rows once to hold them.
+        self._reconcile = False
         self._last_heartbeat_ok = time.monotonic()
         self._abandon = False
         self._heartbeat_failing = False
@@ -277,7 +282,7 @@ class Worker:
         for queue in self.queues:
             async with self.app.engine.begin() as connection:
                 await _cancel_due(connection, self.app.hooks, queue)
-                busy = await count_running(connection, self.id, queue)
+                busy = sum(1 for job in self._held.values() if job.queue == queue)
                 limit = self.slots - busy
                 claimed = await claim_queue(
                     connection,
@@ -288,10 +293,13 @@ class Worker:
                     limit=limit,
                     fair=self.fair,
                 )
-                if limit > 0 and claimed == limit:
-                    full = True
-                if limit <= 0:
-                    taken.add(queue)
+            # Held once the claim has committed: a rolled-back claim holds nothing.
+            for job in claimed:
+                self._held[job.id] = job
+            if limit > 0 and len(claimed) == limit:
+                full = True
+            if limit <= 0:
+                taken.add(queue)
         self._last_claim_full = full
         self._taken = frozenset(taken)
 
@@ -317,13 +325,20 @@ class Worker:
     async def _spawn(self) -> list[asyncio.Task[None]]:
         if self._fatal is not None:
             raise self._fatal
-        await self.claim_available()
-        async with self.app.engine.connect() as connection:
-            jobs = await running_jobs(connection, self.id)
+        try:
+            if self._reconcile:
+                async with self.app.engine.connect() as connection:
+                    for job in await running_jobs(connection, self.id):
+                        self._held.setdefault(job.id, job)
+                self._reconcile = False
+            await self.claim_available()
+        except BaseException:
+            self._reconcile = True
+            raise
         if self._fatal is not None:
             raise self._fatal
         started: list[asyncio.Task[None]] = []
-        for job in jobs:
+        for job in list(self._held.values()):
             if job.id in self._inflight or job.id in self._stuck:
                 continue
             task = asyncio.create_task(self._execute(job))
@@ -568,6 +583,8 @@ class Worker:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
+                if job.id not in self._stuck:
+                    self._held.pop(job.id, None)
 
     def _freed(self, job: Job) -> None:
         """Wake the pause: this run's outcome is written, so its slot is free.

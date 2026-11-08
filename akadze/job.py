@@ -116,20 +116,6 @@ async def running_jobs(connection: AsyncConnection, worker_id: UUID) -> list[Job
     return [job_from_mapping(row) for row in rows.mappings()]
 
 
-async def count_running(connection: AsyncConnection, worker_id: UUID, queue: str) -> int:
-    count = await connection.scalar(
-        text(
-            """
-            SELECT count(*)
-            FROM akadze.jobs
-            WHERE state = 'running' AND worker_id = :worker_id AND queue = :queue
-            """
-        ),
-        {"worker_id": worker_id, "queue": queue},
-    )
-    return int(count or 0)
-
-
 async def job_by_id(connection: AsyncConnection, job_id: int) -> Job | None:
     result = await connection.execute(
         text(
