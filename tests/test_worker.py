@@ -5,9 +5,11 @@ import time
 from datetime import timedelta
 
 import pytest
+from pytest_mock import MockerFixture
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from akadze import Akadze, migrate
+from akadze import worker as worker_module
 from akadze.schema import async_database_url
 from akadze.worker import Worker, poll_delay
 from tests.factories import age_worker_heartbeat, bump_run_count
@@ -514,9 +516,9 @@ async def test_claim_counts_the_slots_it_already_holds(app: Akadze, database_url
 
 
 async def test_step_runs_rows_a_failed_claim_may_have_committed(
-    app: Akadze, database_url: str
+    app: Akadze, database_url: str, mocker: MockerFixture
 ) -> None:
-    # Arrange — the claim committed, but the worker did not learn which rows it took
+    # Arrange — the claim commits, then the worker sees an error and learns nothing
     calls = 0
 
     @app.task("demo")
@@ -527,9 +529,21 @@ async def test_step_runs_rows_a_failed_claim_may_have_committed(
     async with app.engine.begin() as session:
         await demo.using(session=session).enqueue()
     worker = Worker(app)
-    await worker.claim_available()
-    worker._held.clear()
-    worker._reconcile = True
+    claim = worker.claim_available
+
+    passes = 0
+
+    async def claim_then_fail() -> None:
+        nonlocal passes
+        passes += 1
+        await claim()
+        if passes == 1:
+            worker._held.clear()
+            raise OSError("connection reset after COMMIT")
+
+    mocker.patch.object(worker, "claim_available", side_effect=claim_then_fail)
+    with pytest.raises(OSError):
+        await worker.step()
 
     # Act
     await worker.step()
@@ -539,3 +553,33 @@ async def test_step_runs_rows_a_failed_claim_may_have_committed(
     assert row is not None
     assert row["state"] == "succeeded"
     assert calls == 1
+
+
+async def test_a_run_lost_to_a_transient_error_starts_again_without_a_new_claim(
+    app: Akadze, database_url: str, mocker: MockerFixture
+) -> None:
+    # Arrange — one slot; the start read of the first job fails once
+    calls: list[int] = []
+
+    @app.task("demo")
+    async def demo(n: int) -> None:
+        calls.append(n)
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue(n=1)
+        await demo.using(session=session).enqueue(n=2)
+    read = worker_module.job_by_id
+    mocker.patch.object(
+        worker_module, "job_by_id", side_effect=[OSError("connection reset"), read, read]
+    )
+    worker = Worker(app, slots=1)
+    await worker.step()
+
+    # Act
+    mocker.patch.object(worker_module, "job_by_id", read)
+    await worker.step()
+
+    # Assert — the held job ran; the second job was not claimed past the slot
+    assert calls == [1]
+    states = sorted(row["state"] for row in await job_rows(database_url))
+    assert states == ["queued", "succeeded"]

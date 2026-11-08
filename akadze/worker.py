@@ -196,8 +196,10 @@ class Worker:
         self.fair = fair
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
-        # Jobs this worker holds running: claimed and not started yet, in
-        # flight, or stuck. Slots are counted here, not with a query per claim.
+        # Jobs whose rows run under this worker: claimed and not started, in
+        # flight, stuck, or ended without an outcome (started again by the next
+        # claim pass). Slots are counted here, not with a query per claim. A job
+        # leaves only when its outcome is written or the row is no longer ours.
         self._held: dict[int, Job] = {}
         # Set when a claim fails: its commit may have reached the database, so
         # the next claim reads this worker's running rows once to hold them.
@@ -527,6 +529,7 @@ class Worker:
                             text("DELETE FROM akadze.workers WHERE id = :id"),
                             {"id": self.id},
                         )
+            self._held = {i: j for i, j in self._held.items() if i in self._stuck}
         except DB_ERRORS as exc:
             logger.warning(
                 "worker %s could not release its jobs; another worker will rescue them: %s",
@@ -583,16 +586,16 @@ class Worker:
             reset_run(token)
             if self._inflight.get(job.id) is asyncio.current_task():
                 self._inflight.pop(job.id, None)
-                if job.id not in self._stuck:
-                    self._held.pop(job.id, None)
 
     def _freed(self, job: Job) -> None:
-        """Wake the pause: this run's outcome is written, so its slot is free.
+        """This run's outcome is written: free its slot and wake the pause.
 
-        Only then: a run that left its row running (lost, stale) is not a free
-        slot, and waking for it would restart it at once.
+        Only then: a run that left its row running (lost, stale, cancelled) is
+        not a free slot. It stays held, and the next claim pass starts it
+        again, as it would find the row running under this worker.
         """
 
+        self._held.pop(job.id, None)
         if self._slot_freed is not None and job.queue in self._taken:
             self._slot_freed.set()
 
@@ -717,6 +720,7 @@ class Worker:
             or fresh.run_count != job.run_count
             or fresh.worker_id != self.id
         ):
+            self._held.pop(job.id, None)  # the row is not this run's any more
             raise _Lost
         if fresh.cancel_requested_at is not None or fresh.expired:
             raise Cancel()
