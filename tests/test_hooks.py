@@ -9,8 +9,10 @@ from pytest_mock import MockerFixture
 from sqlalchemy import text
 
 from akadze import Akadze, request_cancel
+from akadze.maintenance import rescue
 from akadze.testing import drain
 from akadze.worker import Worker
+from tests.factories import age_worker_heartbeat
 from tests.pg import as_json, connection, job_row, job_rows
 
 
@@ -33,7 +35,9 @@ async def test_enqueue_hook_error_rolls_back_the_insert(
     reject.assert_awaited_once()
 
 
-async def test_transition_hook_error_rolls_its_change_back(app: Akadze, database_url: str) -> None:
+async def test_transition_hook_runs_in_the_transaction_that_changes_the_state(
+    app: Akadze, database_url: str
+) -> None:
     # Arrange
     seen: dict[str, object] = {}
 
@@ -41,7 +45,7 @@ async def test_transition_hook_error_rolls_its_change_back(app: Akadze, database
     async def demo() -> None:
         return None
 
-    async def reject(connection: object, job: object, from_state: str, to_state: str) -> None:
+    async def look(connection: object, job: object, from_state: str, to_state: str) -> None:
         if to_state != "succeeded":
             return
         state = await connection.scalar(  # type: ignore[attr-defined]
@@ -49,12 +53,9 @@ async def test_transition_hook_error_rolls_its_change_back(app: Akadze, database
         )
         seen["state"] = state
         seen["from"] = from_state
-        seen["to"] = to_state
-        backend = await connection.scalar(text("SELECT pg_backend_pid()"))  # type: ignore[attr-defined]
-        seen["backend"] = backend
-        raise RuntimeError("transition hook")
+        seen["backend"] = await connection.scalar(text("SELECT pg_backend_pid()"))  # type: ignore[attr-defined]
 
-    app.hooks.on_transition.append(reject)
+    app.hooks.on_transition.append(look)
     async with app.engine.begin() as session:
         await demo.using(session=session).enqueue()
 
@@ -63,15 +64,157 @@ async def test_transition_hook_error_rolls_its_change_back(app: Akadze, database
 
     # Assert
     assert seen["from"] == "running"
-    assert seen["to"] == "succeeded"
     assert seen["state"] == "succeeded"
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "failed"
-    assert row["result"] is None
     async with connection(database_url) as opened:
         other = await opened.fetchval("SELECT pg_backend_pid()")
     assert seen["backend"] != other
+
+
+async def test_transition_hook_error_rolls_back_only_its_own_writes(
+    app: Akadze, database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange — the hook audits every change and raises on the outcome
+    async with connection(database_url) as opened:
+        await opened.execute("CREATE TABLE akadze.test_audit (to_state text)")
+
+    @app.task("demo", max_attempts=3)
+    async def demo() -> str:
+        return "done"
+
+    async def audit(connection: object, job: object, from_state: str, to_state: str) -> None:
+        await connection.execute(  # type: ignore[attr-defined]
+            text("INSERT INTO akadze.test_audit VALUES (:to)"), {"to": to_state}
+        )
+        if to_state == "succeeded":
+            raise RuntimeError("audit says no: secret-detail")
+
+    app.hooks.on_transition.append(audit)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert (row["state"], as_json(row["result"])) == ("succeeded", "done")
+    async with connection(database_url) as opened:
+        audited = [
+            r["to_state"] for r in await opened.fetch("SELECT to_state FROM akadze.test_audit")
+        ]
+    assert audited == ["running"]
+    assert "on_transition hook" in caplog.text and "RuntimeError" in caplog.text
+    assert "secret-detail" not in caplog.text
+
+
+async def test_transition_hook_database_error_does_not_abort_the_transition(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange — a failed statement would abort the whole transaction without a savepoint
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async def broken(connection: object, job: object, from_state: str, to_state: str) -> None:
+        await connection.execute(text("SELECT 1 / 0"))  # type: ignore[attr-defined]
+
+    app.hooks.on_transition.append(broken)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await drain(app)
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "succeeded"
+
+
+async def test_transition_hook_that_always_raises_does_not_stop_the_worker(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange
+    calls = 0
+
+    @app.task("demo")
+    async def demo() -> None:
+        nonlocal calls
+        calls += 1
+
+    def broken(connection: object, job: object, from_state: str, to_state: str) -> None:
+        raise RuntimeError("broken hook")
+
+    app.hooks.on_transition.append(broken)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(
+        app, heartbeat_interval=timedelta(hours=1), poll_interval=timedelta(milliseconds=50)
+    )
+    stop = asyncio.Event()
+
+    async def stop_when_done() -> None:
+        while (row := await job_row(database_url, "demo")) is None or row["state"] != "succeeded":
+            await asyncio.sleep(0.02)
+        stop.set()
+
+    # Act
+    await asyncio.wait_for(asyncio.gather(worker.serve(stop), stop_when_done()), 10)
+
+    # Assert
+    assert calls == 1
+
+
+async def test_transition_hook_error_keeps_the_retry(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        raise ValueError("bad input")
+
+    def reject_retry(connection: object, job: object, from_state: str, to_state: str) -> None:
+        if (from_state, to_state) == ("running", "queued"):
+            raise RuntimeError("no retries")
+
+    app.hooks.on_transition.append(reject_retry)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert (row["state"], row["attempt"]) == ("queued", 1)
+    assert as_json(row["errors"])[-1]["message"] == "bad input"
+
+
+async def test_transition_hook_error_keeps_a_queued_cancel(app: Akadze, database_url: str) -> None:
+    # Arrange
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    def reject_cancel(connection: object, job: object, from_state: str, to_state: str) -> None:
+        if to_state == "cancelled":
+            raise RuntimeError("no cancels")
+
+    app.hooks.on_transition.append(reject_cancel)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    async with app.engine.begin() as session:
+        await request_cancel(session, row["id"])
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "cancelled"
 
 
 async def test_logs_omit_arguments_and_results(
@@ -95,131 +238,59 @@ async def test_logs_omit_arguments_and_results(
     assert "succeeded" in caplog.text
 
 
-async def test_transition_hook_error_fails_the_job_without_running_it_again(
-    app: Akadze, database_url: str
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("secret-msg"), ConnectionRefusedError("secret-msg")],
+    ids=["timeout", "network"],
+)
+async def test_transition_hook_network_error_is_contained(
+    app: Akadze, database_url: str, caplog: pytest.LogCaptureFixture, error: Exception
 ) -> None:
-    # Arrange
-    calls = 0
-    seen: list[tuple[str, str]] = []
-
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        nonlocal calls
-        calls += 1
-
-    def audit(connection: object, job: object, from_state: str, to_state: str) -> None:
-        seen.append((from_state, to_state))
-        if to_state == "succeeded":
-            raise RuntimeError("audit table is gone")
-
-    app.hooks.on_transition.append(audit)
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await drain(app)
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "failed"
-    assert calls == 1
-    assert seen == [("queued", "running"), ("running", "succeeded"), ("running", "failed")]
-    errors = as_json(row["errors"])
-    assert errors[-1]["message"] == (
-        "outcome could not be recorded: RuntimeError: audit table is gone"
-    )
-
-
-async def test_transition_hook_that_always_raises_stops_the_worker(
-    app: Akadze, database_url: str
-) -> None:
-    # Arrange
-    calls = 0
-
+    # Arrange — an OSError from the hook is not a lost database connection
     @app.task("demo")
     async def demo() -> None:
-        nonlocal calls
-        calls += 1
+        return None
+
+    def webhook(connection: object, job: object, from_state: str, to_state: str) -> None:
+        raise error
+
+    app.hooks.on_transition.append(webhook)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "succeeded"
+    assert f"{type(error).__name__} at " in caplog.text
+    assert "secret-msg" not in caplog.text
+
+
+async def test_transition_hook_error_does_not_block_rescue(app: Akadze, database_url: str) -> None:
+    # Arrange — a stale worker holds the job; the hook rejects every change
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(app)
+    await worker.register()
+    await worker.claim_available()
 
     def broken(connection: object, job: object, from_state: str, to_state: str) -> None:
-        if to_state in ("succeeded", "failed"):
-            raise RuntimeError("broken hook")
+        raise RuntimeError("broken hook")
 
     app.hooks.on_transition.append(broken)
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-    worker = Worker(app, heartbeat_interval=timedelta(hours=1))
+    await age_worker_heartbeat(app.engine, worker.id, older_than=timedelta(minutes=2))
 
     # Act
-    with pytest.raises(RuntimeError, match="broken hook"):
-        await worker.serve(asyncio.Event())
+    await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
 
     # Assert
     row = await job_row(database_url, "demo")
     assert row is not None
-    assert (row["state"], row["attempt"], row["worker_id"]) == ("running", 0, worker.id)
-    assert calls == 1
-    async with connection(database_url) as opened:
-        kept = await opened.fetchval("SELECT count(*) FROM akadze.workers WHERE id = $1", worker.id)
-    assert kept == 1
-
-
-async def test_transition_hook_error_on_a_cancel_fails_the_job_with_the_reason(
-    app: Akadze, database_url: str
-) -> None:
-    # Arrange — cancel arrives mid-run, the body raises, the hook rejects "cancelled"
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        row = await job_row(database_url, "demo")
-        assert row is not None
-        async with app.engine.begin() as session:
-            await request_cancel(session, row["id"])
-        raise RuntimeError("body")
-
-    def reject_cancel(connection: object, job: object, from_state: str, to_state: str) -> None:
-        if to_state == "cancelled":
-            raise RuntimeError("no cancels")
-
-    app.hooks.on_transition.append(reject_cancel)
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "failed"
-    assert as_json(row["errors"])[-1]["message"] == (
-        "outcome could not be recorded: RuntimeError: no cancels; the run raised RuntimeError"
-    )
-
-
-async def test_transition_hook_error_keeps_the_run_error_in_the_reason(
-    app: Akadze, database_url: str
-) -> None:
-    # Arrange
-    @app.task("demo", max_attempts=3)
-    async def demo() -> None:
-        raise ValueError("bad input")
-
-    def reject_retry(connection: object, job: object, from_state: str, to_state: str) -> None:
-        if (from_state, to_state) == ("running", "queued"):
-            raise RuntimeError("no retries")
-
-    app.hooks.on_transition.append(reject_retry)
-    async with app.engine.begin() as session:
-        await demo.using(session=session).enqueue()
-
-    # Act
-    await Worker(app).step()
-
-    # Assert
-    row = await job_row(database_url, "demo")
-    assert row is not None
-    assert row["state"] == "failed"
-    assert as_json(row["errors"])[-1]["message"] == (
-        "outcome could not be recorded: RuntimeError: no retries; the run raised ValueError"
-    )
+    assert (row["state"], row["attempt"], row["worker_id"]) == ("queued", 1, None)

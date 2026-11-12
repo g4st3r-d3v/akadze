@@ -612,7 +612,7 @@ class Worker:
         A transient database error is retried while the heartbeat is fresh, so
         the claim loop does not run the job again. Once the heartbeat is stale
         the job is left for rescue. Any other database error (the outcome
-        cannot be stored), or an ``on_transition`` hook that raises, fails the
+        cannot be stored), or any other error while recording, fails the
         job without another attempt, since the body may have succeeded; if
         even that fails, the worker stops.
         """
@@ -645,8 +645,9 @@ class Worker:
                     max(min(self._error_delay(failures), self._heartbeat_left()), 0.0)
                 )
             except Exception as error:
-                # The only user code in this transaction: an on_transition hook.
-                # The body may have run to the end, so the job fails, not retries.
+                # Hooks contain their own errors (Hooks.ran_transition), so this
+                # is a bug in recording, such as an exception whose __str__
+                # raises. The body may have run to the end: fail, do not rerun.
                 reason = f"outcome could not be recorded: {_describe(error)}"
                 if exc is not None:
                     reason += f"; the run raised {_kind(exc)}"
