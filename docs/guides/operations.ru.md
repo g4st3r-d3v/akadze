@@ -34,6 +34,10 @@ app = Akadze(database_url="postgresql://app@db/app", pool_size=25)
 
 Доставка в обоих режимах at-least-once. Если пачка падает, каждое её выполнение записывает исход отдельно, как без пачек. Хуки `on_transition` вызываются по строкам в транзакции пачки, каждый в своём savepoint, но вне контекста выполнения (`current()` — не это выполнение).
 
+### Event loop { #event-loop }
+
+`pip install "akadze[uvloop]"` — и `akadze worker` работает на [uvloop](https://github.com/MagicStack/uvloop), event loop на C. Воркер тратит большую часть CPU в цикле и вводе-выводе сокетов, поэтому становится быстрее без изменений в коде. `--loop auto` (по умолчанию) берёт uvloop, если он установлен, `--loop asyncio` оставляет стандартный цикл, `--loop uvloop` без него завершается с ошибкой. В своём процессе запускайте воркер через `uvloop.run(...)` вместо `asyncio.run(...)`. Windows uvloop не поддерживает.
+
 ### PgBouncer
 
 Engine, который создаёт `Akadze(database_url=...)`, отключает кэш prepared statements в asyncpg, поэтому перед базой может стоять пул в transaction-режиме. Если передаёте свой `engine`, задайте `connect_args={"statement_cache_size": 0}` сами.

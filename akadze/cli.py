@@ -6,10 +6,13 @@ import argparse
 import asyncio
 import importlib
 import json
+import logging
 import os
 import signal
 import sys
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="MS",
         help="Write finished runs together every MS milliseconds (off by default)",
+    )
+    worker.add_argument(
+        "--loop",
+        choices=["auto", "asyncio", "uvloop"],
+        default="auto",
+        help="Event loop: uvloop when installed (auto), or force one",
     )
     sub.add_parser("beat", help="Unused: periodic tasks run inside the worker")
     sub.add_parser("migrate", help="Apply schema migrations")
@@ -121,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             queues=args.queues,
             fair=args.fair,
             outcome_batch=args.outcome_batch,
+            loop=args.loop,
         )
     if args.command == "jobs":
         if args.jobs_command == "list":
@@ -484,6 +494,29 @@ def _format_dt(value: datetime | None) -> str:
     return value.isoformat()
 
 
+def _loop_runner(loop: str) -> Callable[[Coroutine[Any, Any, None]], None]:
+    """``asyncio.run`` or ``uvloop.run``. ``auto`` takes uvloop when it is installed.
+
+    uvloop runs the event loop in C (libuv): the worker spends most of its CPU
+    in the loop and in socket I/O, so it is faster with uvloop.
+    """
+
+    if loop == "asyncio":
+        return asyncio.run
+    try:
+        import uvloop  # type: ignore[import-not-found,unused-ignore]
+
+        run: Callable[[Coroutine[Any, Any, None]], None] = uvloop.run
+    except (ImportError, AttributeError) as exc:
+        if loop == "uvloop":
+            raise ImportError(str(exc)) from exc
+        if not isinstance(exc, ModuleNotFoundError):
+            # Installed but broken (or too old for uvloop.run): say so, then go on.
+            print(f"uvloop not usable, running on asyncio: {exc}", file=sys.stderr)
+        return asyncio.run
+    return run
+
+
 def _milliseconds(value: str) -> timedelta:
     try:
         delay = timedelta(milliseconds=float(value.removesuffix("ms")))
@@ -501,7 +534,20 @@ def _run_worker(
     queues: list[str] | None,
     fair: bool,
     outcome_batch: timedelta | None = None,
+    loop: str = "auto",
 ) -> int:
+    try:
+        runner = _loop_runner(loop)
+    except ImportError as exc:
+        print(
+            f'worker failed: --loop uvloop: {exc} (install: pip install "akadze[uvloop]")',
+            file=sys.stderr,
+        )
+        return 1
+    # Through the akadze logger, like the worker's other lines: stderr stays for errors.
+    logging.getLogger("akadze").info(
+        "worker event loop: %s", "asyncio" if runner is asyncio.run else "uvloop"
+    )
     app = _load_app(spec)
     worker = Worker(app, slots=slots, queues=queues, fair=fair, outcome_batch=outcome_batch)
 
@@ -512,7 +558,7 @@ def _run_worker(
             await app.aclose()
 
     try:
-        asyncio.run(_run())
+        runner(_run())
     except ValueError as exc:
         print(f"worker failed: {exc}", file=sys.stderr)
         return 1

@@ -34,6 +34,10 @@ By default each finished run writes its outcome in its own transaction. `Worker(
 
 Delivery is at-least-once in both modes. If a batch fails, each of its runs writes its outcome alone, as without batching. `on_transition` hooks run per row in the batch transaction, each in its own savepoint, but outside the run's context (`current()` is not that run).
 
+### Event loop
+
+`pip install "akadze[uvloop]"` and `akadze worker` runs on [uvloop](https://github.com/MagicStack/uvloop), an event loop in C. The worker spends most of its CPU in the loop and in socket I/O, so it gets faster with no code change. `--loop auto` (the default) takes uvloop when it is installed, `--loop asyncio` keeps the standard loop, `--loop uvloop` fails without it. In your own process, run the worker with `uvloop.run(...)` instead of `asyncio.run(...)`. uvloop does not support Windows.
+
 ### PgBouncer
 
 The engine `Akadze(database_url=...)` builds disables asyncpg's statement cache, so a transaction-mode pool can sit in front. If you pass your own `engine`, set `connect_args={"statement_cache_size": 0}` yourself.
