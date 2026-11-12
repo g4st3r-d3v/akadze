@@ -645,9 +645,9 @@ class Worker:
                     max(min(self._error_delay(failures), self._heartbeat_left()), 0.0)
                 )
             except Exception as error:
-                # Hooks contain their own errors, so this is a bug in recording
-                # (an exception whose __str__ raises, say). The body may have run
-                # to the end, so the job fails rather than running again.
+                # Hooks contain their own errors (Hooks.ran_transition), so this
+                # is a bug in recording, such as an exception whose __str__
+                # raises. The body may have run to the end: fail, do not rerun.
                 reason = f"outcome could not be recorded: {_describe(error)}"
                 if exc is not None:
                     reason += f"; the run raised {_kind(exc)}"

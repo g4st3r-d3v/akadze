@@ -140,7 +140,7 @@ async def test_cancel_during_complete_tx_commits_the_write(
     assert await _note_count(database_url) == 1
 
 
-async def test_transition_hook_error_rolls_back_the_write(
+async def test_transition_hook_error_keeps_the_write_and_the_outcome(
     app: Akadze,
     database_url: str,
     notes: None,
@@ -171,9 +171,8 @@ async def test_transition_hook_error_rolls_back_the_write(
     # Assert
     row = await job_row(database_url, "save")
     assert row is not None
-    assert row["state"] == "queued"
-    assert row["attempt"] == 1
-    assert await _note_count(database_url) == 0
+    assert row["state"] == "succeeded"
+    assert await _note_count(database_url) == 1
 
 
 async def test_nested_complete_tx_rolls_back_the_write(

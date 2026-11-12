@@ -9,8 +9,10 @@ from pytest_mock import MockerFixture
 from sqlalchemy import text
 
 from akadze import Akadze, request_cancel
+from akadze.maintenance import rescue
 from akadze.testing import drain
 from akadze.worker import Worker
+from tests.factories import age_worker_heartbeat
 from tests.pg import as_json, connection, job_row, job_rows
 
 
@@ -234,3 +236,61 @@ async def test_logs_omit_arguments_and_results(
     assert "secret-arg-value" not in caplog.text
     assert "secret-result-value" not in caplog.text
     assert "succeeded" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("secret-msg"), ConnectionRefusedError("secret-msg")],
+    ids=["timeout", "network"],
+)
+async def test_transition_hook_network_error_is_contained(
+    app: Akadze, database_url: str, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    # Arrange — an OSError from the hook is not a lost database connection
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    def webhook(connection: object, job: object, from_state: str, to_state: str) -> None:
+        raise error
+
+    app.hooks.on_transition.append(webhook)
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+
+    # Act
+    await Worker(app).step()
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert row["state"] == "succeeded"
+    assert f"{type(error).__name__} at " in caplog.text
+    assert "secret-msg" not in caplog.text
+
+
+async def test_transition_hook_error_does_not_block_rescue(app: Akadze, database_url: str) -> None:
+    # Arrange — a stale worker holds the job; the hook rejects every change
+    @app.task("demo", max_attempts=3)
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue()
+    worker = Worker(app)
+    await worker.register()
+    await worker.claim_available()
+
+    def broken(connection: object, job: object, from_state: str, to_state: str) -> None:
+        raise RuntimeError("broken hook")
+
+    app.hooks.on_transition.append(broken)
+    await age_worker_heartbeat(app.engine, worker.id, older_than=timedelta(minutes=2))
+
+    # Act
+    await rescue(app.engine, app.hooks, ttl=timedelta(seconds=30))
+
+    # Assert
+    row = await job_row(database_url, "demo")
+    assert row is not None
+    assert (row["state"], row["attempt"], row["worker_id"]) == ("queued", 1, None)

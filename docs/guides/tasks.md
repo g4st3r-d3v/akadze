@@ -90,7 +90,7 @@ There is no global app and no `shared_task`.
 | `on_enqueue` | `(connection, job)` | in the enqueue transaction, once per job |
 | `before_run` | `(job)` | before the task body |
 | `after_run` | `(job)` | after the body returns, inside its timeout; an error here counts as a failed run: an attempt is spent and the whole body runs again on retry |
-| `on_transition` | `(connection, job, from_state, to_state)` | in the transaction that changes the state, in its own savepoint: if it raises, its writes are rolled back, the error is logged (type only) and the state change still commits. A hook cannot stop a worker or undo a transition |
+| `on_transition` | `(connection, job, from_state, to_state)` | in the transaction that changes the state, in its own savepoint: if it raises, its writes are rolled back, the error is logged (type only) and the state change still commits. This covers timeouts, network errors and lock or statement timeouts from the hook's own SQL: a hook cannot stop a worker or undo a transition. Only a connection left unusable fails the transaction. Writes that must commit only if the hook succeeds (an outbox row) belong in the code that changes the state |
 
 ```python
 async def count(connection, job, from_state, to_state):
