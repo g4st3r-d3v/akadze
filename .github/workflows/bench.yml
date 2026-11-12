@@ -64,12 +64,21 @@ jobs:
           done
       - name: Run
         run: |
+          # head-batch: the head with outcome_batch=10ms, when its Worker has it.
+          trees="base head"
+          if venv-head/bin/python -c 'import inspect, sys, akadze; sys.exit("outcome_batch" not in inspect.signature(akadze.Worker).parameters)'; then
+            trees="$trees head-batch"
+          fi
+          echo "$trees" > trees.txt
           for round in $(seq "$ROUNDS"); do
-            for tree in base head; do
-              # The script under test is the head's, so both trees run the same benchmark.
-              (cd "$tree" && "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
+            for variant in $trees; do
+              tree="${variant%-batch}"
+              batch=""
+              [ "$variant" = head-batch ] && batch=10
+              # The script under test is the head's, so every tree runs the same benchmark.
+              (cd "$tree" && BENCH_OUTCOME_BATCH_MS="$batch" "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
                 | python -c 'import json,sys; print(json.load(sys.stdin)["median_s"]["akadze"]["process"])' \
-                >> "$tree.txt"
+                >> "$variant.txt"
             done
           done
       - name: Summary
@@ -77,13 +86,14 @@ jobs:
           python - << 'PY' >> "$GITHUB_STEP_SUMMARY"
           import os, statistics
           n = int(os.environ.get("BENCH_N", "10000"))
-          rows = {t: [float(x) for x in open(f"{t}.txt")] for t in ("base", "head")}
+          trees = open("trees.txt").read().split()
+          rows = {t: [float(x) for x in open(f"{t}.txt")] for t in trees}
           med = {t: statistics.median(v) for t, v in rows.items()}
-          print("| tree | median process, s | jobs/s | runs |")
-          print("|---|---|---|---|")
-          for t in ("base", "head"):
+          print("| tree | median process, s | jobs/s | vs base | runs |")
+          print("|---|---|---|---|---|")
+          for t in trees:
               runs = ", ".join(f"{x:.2f}" for x in rows[t])
-              print(f"| {t} | {med[t]:.2f} | {n / med[t]:.0f} | {runs} |")
-          print(f"\nhead vs base: {med['base'] / med['head']:.2f}x, {n} no-op jobs, 20 slots")
+              print(f"| {t} | {med[t]:.2f} | {n / med[t]:.0f} | {med['base'] / med[t]:.2f}x | {runs} |")
+          print(f"\n{n} no-op jobs, one worker, 20 slots; head-batch = outcome_batch 10 ms")
           PY
           cat "$GITHUB_STEP_SUMMARY"

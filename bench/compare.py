@@ -88,7 +88,13 @@ async def bench_akadze() -> dict[str, float]:
     enqueue_batch = time.perf_counter() - started
 
     probe = await asyncpg.connect(url)
-    worker = Worker(app, slots=CONCURRENCY)
+    batch_ms = os.environ.get("BENCH_OUTCOME_BATCH_MS")
+    if batch_ms:
+        worker = Worker(
+            app, slots=CONCURRENCY, outcome_batch=timedelta(milliseconds=float(batch_ms))
+        )
+    else:
+        worker = Worker(app, slots=CONCURRENCY)
     stop = asyncio.Event()
     started = time.perf_counter()
     serving = asyncio.create_task(worker.serve(stop))
