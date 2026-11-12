@@ -2,3 +2,4 @@
 pgqueuer==1.6.0
 procrastinate==3.10.0
 psycopg[binary]==3.3.6
+uvloop==0.23.0

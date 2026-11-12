@@ -228,4 +228,9 @@ async def main(runs: int) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(int(sys.argv[1]) if len(sys.argv) > 1 else 1))
+    run = asyncio.run
+    if os.environ.get("BENCH_LOOP") == "uvloop":
+        import uvloop
+
+        run = uvloop.run
+    run(main(int(sys.argv[1]) if len(sys.argv) > 1 else 1))

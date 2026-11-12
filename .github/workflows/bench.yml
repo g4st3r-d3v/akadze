@@ -60,23 +60,26 @@ jobs:
         run: |
           for tree in base head; do
             python -m venv "venv-$tree"
-            "venv-$tree/bin/pip" install -q -e "$tree"
+            "venv-$tree/bin/pip" install -q -e "$tree" uvloop==0.23.0
           done
       - name: Run
         run: |
-          # head-batch: the head with outcome_batch=10ms, when its Worker has it.
-          trees="base head"
+          # Variants of the head: -batch = outcome_batch 10 ms (when its Worker has it),
+          # -uvloop = the uvloop event loop.
+          trees="base head head-uvloop"
           if venv-head/bin/python -c 'import inspect, sys, akadze; sys.exit("outcome_batch" not in inspect.signature(akadze.Worker).parameters)'; then
-            trees="$trees head-batch"
+            trees="$trees head-batch head-batch-uvloop"
           fi
           echo "$trees" > trees.txt
           for round in $(seq "$ROUNDS"); do
             for variant in $trees; do
-              tree="${variant%-batch}"
+              tree="${variant%%-*}"
               batch=""
-              [ "$variant" = head-batch ] && batch=10
+              loop=""
+              case "$variant" in *-batch*) batch=10 ;; esac
+              case "$variant" in *-uvloop) loop=uvloop ;; esac
               # The script under test is the head's, so every tree runs the same benchmark.
-              (cd "$tree" && BENCH_OUTCOME_BATCH_MS="$batch" "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
+              (cd "$tree" && BENCH_OUTCOME_BATCH_MS="$batch" BENCH_LOOP="$loop" "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
                 | python -c 'import json,sys; print(json.load(sys.stdin)["median_s"]["akadze"]["process"])' \
                 >> "$variant.txt"
             done
@@ -94,6 +97,6 @@ jobs:
           for t in trees:
               runs = ", ".join(f"{x:.2f}" for x in rows[t])
               print(f"| {t} | {med[t]:.2f} | {n / med[t]:.0f} | {med['base'] / med[t]:.2f}x | {runs} |")
-          print(f"\n{n} no-op jobs, one worker, 20 slots; head-batch = outcome_batch 10 ms")
+          print(f"\n{n} no-op jobs, one worker, 20 slots; -batch = outcome_batch 10 ms, -uvloop = uvloop")
           PY
           cat "$GITHUB_STEP_SUMMARY"
