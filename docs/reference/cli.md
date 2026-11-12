@@ -28,16 +28,21 @@ options:
 ## akadze worker
 
 ```text
-usage: akadze worker [-h] [--slots SLOTS] [--queue QUEUES] [--fair] app
+usage: akadze worker [-h] [--slots SLOTS] [--queue QUEUES] [--fair] [--outcome-batch MS]
+                     [--loop {auto,asyncio,uvloop}]
+                     app
 
 positional arguments:
-  app             Import path of an Akadze app, for example demo:app
+  app                   Import path of an Akadze app, for example demo:app
 
 options:
-  -h, --help      show this help message and exit
+  -h, --help            show this help message and exit
   --slots SLOTS
   --queue QUEUES
-  --fair          Within a priority, claim round-robin across limit_key groups
+  --fair                Within a priority, claim round-robin across limit_key groups
+  --outcome-batch MS    Write finished runs together every MS milliseconds (off by default)
+  --loop {auto,asyncio,uvloop}
+                        Event loop: uvloop when installed (auto), or force one
 ```
 
 ## akadze migrate

@@ -504,11 +504,15 @@ def _loop_runner(loop: str) -> Callable[[Coroutine[Any, Any, None]], None]:
         return asyncio.run
     try:
         import uvloop  # type: ignore[import-not-found,unused-ignore]
-    except ImportError:
+
+        run: Callable[[Coroutine[Any, Any, None]], None] = uvloop.run
+    except (ImportError, AttributeError) as exc:
         if loop == "uvloop":
-            raise
+            raise ImportError(str(exc)) from exc
+        if not isinstance(exc, ModuleNotFoundError):
+            # Installed but broken (or too old for uvloop.run): say so, then go on.
+            print(f"uvloop not usable, running on asyncio: {exc}", file=sys.stderr)
         return asyncio.run
-    run: Callable[[Coroutine[Any, Any, None]], None] = uvloop.run
     return run
 
 
@@ -529,13 +533,17 @@ def _run_worker(
     queues: list[str] | None,
     fair: bool,
     outcome_batch: timedelta | None = None,
-    loop: str = "asyncio",
+    loop: str = "auto",
 ) -> int:
     try:
         runner = _loop_runner(loop)
-    except ImportError:
-        print("worker failed: --loop uvloop needs `pip install akadze[uvloop]`", file=sys.stderr)
+    except ImportError as exc:
+        print(
+            f'worker failed: --loop uvloop: {exc} (install: pip install "akadze[uvloop]")',
+            file=sys.stderr,
+        )
         return 1
+    print(f"worker event loop: {'asyncio' if runner is asyncio.run else 'uvloop'}", file=sys.stderr)
     app = _load_app(spec)
     worker = Worker(app, slots=slots, queues=queues, fair=fair, outcome_batch=outcome_batch)
 

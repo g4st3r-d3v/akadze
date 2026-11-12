@@ -48,3 +48,17 @@ def test_loop_uvloop_without_uvloop_raises(monkeypatch: pytest.MonkeyPatch) -> N
     # Act / Assert
     with pytest.raises(ImportError):
         _loop_runner("uvloop")
+
+
+def test_loop_auto_falls_back_when_uvloop_has_no_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange — a uvloop too old for uvloop.run, or a module that shadows it
+    monkeypatch.setitem(sys.modules, "uvloop", SimpleNamespace())
+
+    # Act
+    runner = _loop_runner("auto")
+
+    # Assert
+    assert runner is asyncio.run
+    assert "uvloop not usable, running on asyncio" in capsys.readouterr().err

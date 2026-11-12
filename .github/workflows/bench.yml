@@ -60,8 +60,10 @@ jobs:
         run: |
           for tree in base head; do
             python -m venv "venv-$tree"
-            "venv-$tree/bin/pip" install -q -e "$tree" uvloop==0.23.0
+            "venv-$tree/bin/pip" install -q -e "$tree"
           done
+          # Only head variants run on uvloop; same pin as bench/requirements.txt.
+          venv-head/bin/pip install -q "$(grep '^uvloop==' head/bench/requirements.txt)"
       - name: Run
         run: |
           # Variants of the head: -batch = outcome_batch 10 ms (when its Worker has it),
