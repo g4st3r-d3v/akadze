@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Any, TypeGuard
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.pool import QueuePool
 
 from akadze.args import load_arguments
+from akadze.batch import OutcomeBatch
 from akadze.claim import claim_queue
 from akadze.context import bind_run, reset_run
 from akadze.exc import AkadzeError, Cancel, Fail
@@ -31,6 +32,7 @@ from akadze.job import (
     Job,
     job_by_id,
     job_from_mapping,
+    owns,
     run_hot,
     running_jobs,
 )
@@ -168,6 +170,12 @@ class Worker:
     the queue without spending an attempt. ``fair=True`` shares slots across
     ``limit_key`` groups within a priority instead of taking the oldest jobs.
 
+    ``outcome_batch`` (off by default) writes finished runs together: a run's
+    outcome waits up to that long (or until 200 are waiting) and goes into
+    one transaction with the others. Throughput is higher; each outcome
+    lands in the database up to ``outcome_batch`` later. Delivery is the
+    same at-least-once either way, and a run holds its slot until written.
+
     ``akadze worker module:app`` builds one and calls ``serve``.
     """
 
@@ -182,9 +190,12 @@ class Worker:
         poll_interval: timedelta = timedelta(seconds=1),
         shutdown_timeout: timedelta = timedelta(seconds=10),
         fair: bool = False,
+        outcome_batch: timedelta | None = None,
     ) -> None:
         if slots < 1:
             raise ValueError("slots must be at least 1")
+        if outcome_batch is not None and outcome_batch <= timedelta(0):
+            raise ValueError("outcome_batch must be positive")
         if shutdown_timeout < timedelta(0):
             raise ValueError("shutdown_timeout must not be negative")
         self.app = app
@@ -195,6 +206,12 @@ class Worker:
         self.poll_interval = poll_interval
         self.shutdown_timeout = shutdown_timeout
         self.fair = fair
+        self.outcome_batch = outcome_batch
+        self._batch = (
+            None
+            if outcome_batch is None
+            else OutcomeBatch(app.engine, app.hooks, outcome_batch, lambda: len(self._inflight))
+        )
         self.id = uuid4()
         self._inflight: dict[int, asyncio.Task[None]] = {}
         # Jobs whose rows run under this worker: claimed and not started, in
@@ -513,6 +530,8 @@ class Worker:
         spending an attempt.
         """
 
+        if self._batch is not None:
+            self._batch.flush_now()  # finished runs must not wait out the interval
         if not self._abandon:
             await self._drain_inflight()
         pending = [task for task in self._inflight.values() if not task.done()]
@@ -617,6 +636,18 @@ class Worker:
         even that fails, the worker stops.
         """
 
+        if self._batch is not None:
+            try:
+                await self._batch.record(job, exc, result, policy)
+            except Exception as error:
+                logger.warning(
+                    "job %s outcome not written in its batch, writing it alone: %s",
+                    job.id,
+                    _kind(error),
+                )
+            else:
+                self._freed(job)
+                return
         failures = 0
         while True:
             try:
@@ -828,19 +859,10 @@ async def _complete_open_run(connection: AsyncConnection, hooks: Hooks, job: Job
     """
 
     current = await job_by_id(connection, job.id)
-    if not _owns(current, job):
+    if not owns(current, job):
         raise AkadzeError("this run no longer owns the job")
     if not await _apply(connection, hooks, current, None, None):
         raise AkadzeError("this run no longer owns the job")
-
-
-def _owns(current: Job | None, job: Job) -> TypeGuard[Job]:
-    return (
-        current is not None
-        and current.state == "running"
-        and current.run_count == job.run_count
-        and current.worker_id == job.worker_id
-    )
 
 
 async def _finish(
@@ -855,7 +877,7 @@ async def _finish(
 ) -> None:
     async with engine.begin() as connection:
         current = await job_by_id(connection, job.id)
-        if not _owns(current, job):
+        if not owns(current, job):
             logger.info("job %s finish discarded", job.id)
             return
         if not await _apply(

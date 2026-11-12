@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeGuard
 from uuid import UUID
 
 from sqlalchemy import CursorResult, TextClause, text
@@ -154,6 +154,17 @@ _JOB_BY_ID = text(
     WHERE id = :id
     """
 )
+
+
+def owns(current: Job | None, job: Job) -> TypeGuard[Job]:
+    """``current`` is still the run of ``job``: running, same run_count, same worker."""
+
+    return (
+        current is not None
+        and current.state == "running"
+        and current.run_count == job.run_count
+        and current.worker_id == job.worker_id
+    )
 
 
 async def job_by_id(connection: AsyncConnection, job_id: int) -> Job | None:

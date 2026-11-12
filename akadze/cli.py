@@ -51,6 +51,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Within a priority, claim round-robin across limit_key groups",
     )
+    worker.add_argument(
+        "--outcome-batch",
+        type=_milliseconds,
+        default=None,
+        metavar="MS",
+        help="Write finished runs together every MS milliseconds (off by default)",
+    )
     sub.add_parser("beat", help="Unused: periodic tasks run inside the worker")
     sub.add_parser("migrate", help="Apply schema migrations")
 
@@ -108,7 +115,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     if args.command == "worker":
-        return _run_worker(args.app, slots=args.slots, queues=args.queues, fair=args.fair)
+        return _run_worker(
+            args.app,
+            slots=args.slots,
+            queues=args.queues,
+            fair=args.fair,
+            outcome_batch=args.outcome_batch,
+        )
     if args.command == "jobs":
         if args.jobs_command == "list":
             return _run_jobs_list(
@@ -471,9 +484,26 @@ def _format_dt(value: datetime | None) -> str:
     return value.isoformat()
 
 
-def _run_worker(spec: str, *, slots: int, queues: list[str] | None, fair: bool) -> int:
+def _milliseconds(value: str) -> timedelta:
+    try:
+        delay = timedelta(milliseconds=float(value.removesuffix("ms")))
+    except (ValueError, OverflowError):
+        raise argparse.ArgumentTypeError(f"expected milliseconds, got {value!r}") from None
+    if delay <= timedelta(0):
+        raise argparse.ArgumentTypeError("must be at least a microsecond")
+    return delay
+
+
+def _run_worker(
+    spec: str,
+    *,
+    slots: int,
+    queues: list[str] | None,
+    fair: bool,
+    outcome_batch: timedelta | None = None,
+) -> int:
     app = _load_app(spec)
-    worker = Worker(app, slots=slots, queues=queues, fair=fair)
+    worker = Worker(app, slots=slots, queues=queues, fair=fair, outcome_batch=outcome_batch)
 
     async def _run() -> None:
         try:

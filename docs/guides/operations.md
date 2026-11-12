@@ -28,6 +28,12 @@ If you pass your own `engine`, size its pool when you create it; `pool_size` is 
 
 On 2000 no-op jobs with 20 slots, `pool_size=25` takes the run from 7.8 s to 3.1 s.
 
+### Batched outcomes
+
+By default each finished run writes its outcome in its own transaction. `Worker(app, outcome_batch=timedelta(milliseconds=10))` (CLI: `akadze worker app:app --outcome-batch 10`) writes them together: a batch goes out as soon as every run in flight is waiting in it, when 200 wait, or after `outcome_batch` at the latest. On short jobs this raises throughput a lot (1.67x on 10 000 no-op jobs with 20 slots in CI). An outcome may land in the database up to `outcome_batch` later than without it, and a run keeps its slot until its outcome is written.
+
+Delivery is at-least-once in both modes. If a batch fails, each of its runs writes its outcome alone, as without batching. `on_transition` hooks run per row in the batch transaction, each in its own savepoint, but outside the run's context (`current()` is not that run).
+
 ### PgBouncer
 
 The engine `Akadze(database_url=...)` builds disables asyncpg's statement cache, so a transaction-mode pool can sit in front. If you pass your own `engine`, set `connect_args={"statement_cache_size": 0}` yourself.
