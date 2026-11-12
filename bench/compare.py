@@ -12,6 +12,8 @@ can do that on. Usage:
 
     pip install -r bench/requirements.txt
     BENCH_DSN=postgresql://user:pass@host:5432 python bench/compare.py [runs]
+
+``BENCH_LIBS=akadze`` (comma-separated) runs only the named libraries.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ DSN = os.environ.get("BENCH_DSN", "postgresql://akadze:akadze@localhost:5432")
 N = int(os.environ.get("BENCH_N", "10000"))
 M = int(os.environ.get("BENCH_M", "1000"))
 CONCURRENCY = int(os.environ.get("BENCH_CONCURRENCY", "20"))
+SELECTED = {name for name in os.environ.get("BENCH_LIBS", "").split(",") if name}
 POLL = 0.05  # seconds between polls for PgQueuer and Procrastinate
 
 
@@ -206,6 +209,8 @@ async def main(runs: int) -> None:
     results: dict[str, dict[str, list[float]]] = {}
     for _ in range(runs):
         for name, bench in LIBRARIES.items():
+            if SELECTED and name not in SELECTED:
+                continue
             for metric, value in (await bench()).items():
                 results.setdefault(name, {}).setdefault(metric, []).append(value)
     summary = {

@@ -1,0 +1,89 @@
+name: bench
+
+# Throughput of this branch against its base, on one runner, interleaved so
+# that runner noise hits both alike. Add the `bench` label to a pull request
+# (or push to it while labelled), or run it by hand. Numbers go to the job
+# summary. Runners are shared machines: compare the two columns, not the
+# absolute numbers with a laptop.
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: base ref
+        default: main
+      rounds:
+        description: rounds (each runs base and head once)
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  akadze:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'bench')
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: akadze
+          POSTGRES_PASSWORD: akadze
+          POSTGRES_DB: akadze
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U akadze -d akadze"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BENCH_DSN: postgresql://akadze:akadze@localhost:5432
+      BENCH_LIBS: akadze
+      BENCH_M: "1"
+      BASE_REF: ${{ github.event.pull_request.base.sha || inputs.base || 'main' }}
+      ROUNDS: ${{ inputs.rounds || '5' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: head
+      - uses: actions/checkout@v4
+        with:
+          path: base
+          ref: ${{ env.BASE_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install both trees in their own venvs
+        run: |
+          for tree in base head; do
+            python -m venv "venv-$tree"
+            "venv-$tree/bin/pip" install -q -e "$tree"
+          done
+      - name: Run
+        run: |
+          for round in $(seq "$ROUNDS"); do
+            for tree in base head; do
+              # The script under test is the head's, so both trees run the same benchmark.
+              (cd "$tree" && "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
+                | python -c 'import json,sys; print(json.load(sys.stdin)["median_s"]["akadze"]["process"])' \
+                >> "$tree.txt"
+            done
+          done
+      - name: Summary
+        run: |
+          python - << 'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os, statistics
+          n = int(os.environ.get("BENCH_N", "10000"))
+          rows = {t: [float(x) for x in open(f"{t}.txt")] for t in ("base", "head")}
+          med = {t: statistics.median(v) for t, v in rows.items()}
+          print("| tree | median process, s | jobs/s | runs |")
+          print("|---|---|---|---|")
+          for t in ("base", "head"):
+              runs = ", ".join(f"{x:.2f}" for x in rows[t])
+              print(f"| {t} | {med[t]:.2f} | {n / med[t]:.0f} | {runs} |")
+          print(f"\nhead vs base: {med['base'] / med['head']:.2f}x, {n} no-op jobs, 20 slots")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
