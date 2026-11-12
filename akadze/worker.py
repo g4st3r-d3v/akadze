@@ -801,8 +801,8 @@ def _describe(error: BaseException) -> str:
     return f"{kind}: {message}" if message else kind
 
 
-# Runs on every claim pass; jobs_cancel_idx (migration 006) keeps it off the
-# queue's other queued rows.
+# Runs on every claim pass; the partial indexes of migration 006 keep it to the
+# rows it closes, not the queue's other queued rows.
 _CANCEL_DUE = text(
     f"""
     UPDATE akadze.jobs

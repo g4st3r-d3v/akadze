@@ -16,6 +16,7 @@ can do that on. Usage:
 ``BENCH_LIBS=akadze`` (comma-separated) runs only the named libraries.
 ``BENCH_OUTCOME_BATCH_MS=10`` runs the akadze worker with ``outcome_batch``.
 ``BENCH_BACKLOG=100000`` adds that many delayed akadze jobs to the same queue first.
+``BENCH_LOOP=uvloop`` runs everything on uvloop instead of the asyncio loop.
 """
 
 from __future__ import annotations
@@ -113,10 +114,11 @@ async def bench_akadze() -> dict[str, float]:
             serving.result()  # raises what stopped the worker
             raise RuntimeError("worker stopped before the queue was empty")
         # Partial indexes cover queued and running, so this stays cheap.
-        return not await probe.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM akadze.jobs"
-            " WHERE (state = 'queued' AND run_at <= now()) OR state = 'running')"
+        # Finished rows are on jobs_finished_at_idx; a backlog does not make this slower.
+        finished = await probe.fetchval(
+            "SELECT count(*) FROM akadze.jobs WHERE state IN ('succeeded', 'failed', 'cancelled')"
         )
+        return bool(finished >= N)
 
     try:
         await wait_until(done)

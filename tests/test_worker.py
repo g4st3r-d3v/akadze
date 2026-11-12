@@ -613,16 +613,33 @@ async def test_hot_statement_is_compiled_for_the_connection_dialect(
     assert sent == params
 
 
-async def test_cancel_step_reads_the_cancel_index_not_the_queue(app: Akadze) -> None:
-    # Arrange — forbid sequential scans so the plan shows whether the index applies
+async def test_cancel_step_reads_the_cancel_indexes_not_the_queue(
+    app: Akadze, database_url: str
+) -> None:
+    # Arrange — a queue of ordinary jobs, a few cancel requests and a few with a TTL
     from akadze.worker import _CANCEL_DUE
 
-    async with app.engine.begin() as connection:
-        await connection.execute(text("SET LOCAL enable_seqscan = off"))
+    @app.task("demo")
+    async def demo() -> None:
+        return None
+
+    async with app.engine.begin() as session:
+        await demo.using(session=session).enqueue_many({} for _ in range(500))
+    async with connection(database_url) as opened:
+        await opened.execute("UPDATE akadze.jobs SET cancel_requested_at = now() WHERE id <= 5")
+        await opened.execute(
+            "UPDATE akadze.jobs SET expires_at = now() + interval '1 hour'"
+            " WHERE id BETWEEN 6 AND 10"
+        )
+        await opened.execute("ANALYZE akadze.jobs")
+
+    async with app.engine.begin() as session:
+        await session.execute(text("SET LOCAL enable_seqscan = off"))
 
         # Act
-        plan = await connection.execute(text(f"EXPLAIN {_CANCEL_DUE.text}"), {"queue": "default"})
-        lines = [row[0] for row in plan]
+        plan = await session.execute(text(f"EXPLAIN {_CANCEL_DUE.text}"), {"queue": "default"})
+        lines = "\n".join(row[0] for row in plan)
 
-    # Assert
-    assert any("jobs_cancel_idx" in line for line in lines), lines
+    # Assert — both arms of the cancel condition have their own index
+    assert "jobs_cancel_requested_idx" in lines, lines
+    assert "jobs_expires_idx" in lines, lines
