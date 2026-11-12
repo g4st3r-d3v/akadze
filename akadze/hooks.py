@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from akadze.job import Job
+from akadze.schema import DB_ERRORS, is_transient_db_error, public_db_error
+
+logger = logging.getLogger("akadze")
 
 EnqueueHook = Callable[[AsyncConnection, Job], Awaitable[None] | None]
 RunHook = Callable[[Job], Awaitable[None] | None]
@@ -22,14 +26,12 @@ class Hooks:
     ``before_run(job)`` runs before the task body and ``after_run(job)``
     after it returns, inside its timeout; an error there counts as a failed
     run. ``on_transition(connection, job, from_state, to_state)`` runs in the
-    transaction in which enqueue, a worker or a rescue changes the job's
-    state; ``requeue`` does not call it. An error there rolls that
-    transition back. When a worker records a run's outcome, the job is then
-    failed with the error, without another attempt, and ``on_transition``
-    runs again for that change. If it raises again, the worker stops and the
-    job stays running; once the heartbeat expires, rescue requeues it,
-    spending an attempt (``failed`` on the last one), and calls
-    ``on_transition`` too. Append to the lists.
+    transaction in which a worker or a rescue changes the job's state;
+    ``requeue`` does not call it. Each call runs in its own savepoint: if it
+    raises, its own writes are rolled back, the error is logged (type only)
+    and the transition still commits, so a hook cannot stop a worker or undo
+    a state change. A lost connection is the exception: it fails the whole
+    transaction, as any database error there would. Append to the lists.
     """
 
     def __init__(self) -> None:
@@ -58,7 +60,21 @@ class Hooks:
         to_state: str,
     ) -> None:
         for hook in self.on_transition:
-            await _call(hook, connection, job, from_state, to_state)
+            try:
+                async with connection.begin_nested():
+                    await _call(hook, connection, job, from_state, to_state)
+            except Exception as exc:
+                if isinstance(exc, DB_ERRORS) and is_transient_db_error(exc):
+                    raise
+                kind = public_db_error(exc) if isinstance(exc, DB_ERRORS) else type(exc).__name__
+                logger.error(
+                    "on_transition hook %s failed for job %s %s -> %s: %s",
+                    getattr(hook, "__qualname__", type(hook).__name__),
+                    job.id,
+                    from_state,
+                    to_state,
+                    kind,
+                )
 
 
 async def _call(hook: Callable[..., Any], *args: Any) -> None:
