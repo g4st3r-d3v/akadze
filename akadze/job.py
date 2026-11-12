@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import CursorResult, TextClause, text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -116,18 +116,48 @@ async def running_jobs(connection: AsyncConnection, worker_id: UUID) -> list[Job
     return [job_from_mapping(row) for row in rows.mappings()]
 
 
+_DRIVER_SQL: dict[tuple[int, str], tuple[str, tuple[str, ...] | None]] = {}
+
+
+async def run_hot(
+    connection: AsyncConnection, clause: TextClause, params: dict[str, Any]
+) -> CursorResult[Any]:
+    """Run a statement that runs per job, compiled once per dialect.
+
+    ``exec_driver_sql`` skips SQLAlchemy's per-call statement handling, which
+    costs more worker CPU than the statement does. The SQL comes from the
+    ``text()`` clause compiled for this connection's dialect, so any driver
+    works, and the statement stays in the connection's transaction.
+    """
+
+    dialect = connection.dialect
+    key = (id(clause), f"{dialect.name}+{dialect.driver}")
+    cached = _DRIVER_SQL.get(key)
+    if cached is None:
+        compiled = clause.compile(dialect=dialect)
+        order = (
+            tuple(compiled.positiontup) if compiled.positional and compiled.positiontup else None
+        )
+        cached = _DRIVER_SQL[key] = (str(compiled), order)
+    sql, order = cached
+    if order is None:
+        return await connection.exec_driver_sql(sql, params)
+    return await connection.exec_driver_sql(sql, tuple(params[name] for name in order))
+
+
+# Built once: these run once or twice per job.
+_JOB_BY_ID = text(
+    f"""
+    SELECT {_COLUMNS},
+           {expired("jobs")} AS expired
+    FROM akadze.jobs
+    WHERE id = :id
+    """
+)
+
+
 async def job_by_id(connection: AsyncConnection, job_id: int) -> Job | None:
-    result = await connection.execute(
-        text(
-            f"""
-            SELECT {_COLUMNS},
-                   {expired("jobs")} AS expired
-            FROM akadze.jobs
-            WHERE id = :id
-            """
-        ),
-        {"id": job_id},
-    )
+    result = await run_hot(connection, _JOB_BY_ID, {"id": job_id})
     row = result.mappings().first()
     if row is None:
         return None

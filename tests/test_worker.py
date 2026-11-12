@@ -6,10 +6,13 @@ from datetime import timedelta
 
 import pytest
 from pytest_mock import MockerFixture
+from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
+from sqlalchemy.dialects.postgresql import psycopg as psycopg_dialect
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from akadze import Akadze, migrate
 from akadze import worker as worker_module
+from akadze.job import _JOB_BY_ID, run_hot
 from akadze.schema import async_database_url
 from akadze.worker import Worker, poll_delay
 from tests.factories import age_worker_heartbeat, bump_run_count
@@ -583,3 +586,27 @@ async def test_a_run_lost_to_a_transient_error_starts_again_without_a_new_claim(
     assert calls == [1]
     states = sorted(row["state"] for row in await job_rows(database_url))
     assert states == ["queued", "succeeded"]
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql_part", "params"),
+    [
+        (asyncpg_dialect.dialect(), "id = $1", (7,)),
+        (psycopg_dialect.dialect(), "id = %(id)s", {"id": 7}),
+    ],
+    ids=["asyncpg-positional", "psycopg-named"],
+)
+async def test_hot_statement_is_compiled_for_the_connection_dialect(
+    mocker: MockerFixture, dialect: object, sql_part: str, params: object
+) -> None:
+    # Arrange
+    connection = mocker.Mock(dialect=dialect)
+    connection.exec_driver_sql = mocker.AsyncMock()
+
+    # Act
+    await run_hot(connection, _JOB_BY_ID, {"id": 7})
+
+    # Assert
+    sql, sent = connection.exec_driver_sql.await_args.args
+    assert sql_part in sql
+    assert sent == params
