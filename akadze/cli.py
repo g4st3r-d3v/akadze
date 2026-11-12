@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import importlib
 import json
+import logging
 import os
 import signal
 import sys
@@ -543,7 +544,10 @@ def _run_worker(
             file=sys.stderr,
         )
         return 1
-    print(f"worker event loop: {'asyncio' if runner is asyncio.run else 'uvloop'}", file=sys.stderr)
+    # Through the akadze logger, like the worker's other lines: stderr stays for errors.
+    logging.getLogger("akadze").info(
+        "worker event loop: %s", "asyncio" if runner is asyncio.run else "uvloop"
+    )
     app = _load_app(spec)
     worker = Worker(app, slots=slots, queues=queues, fair=fair, outcome_batch=outcome_batch)
 
