@@ -71,7 +71,10 @@ class Hooks:
             except Exception as exc:
                 if connection.invalidated or connection.closed:
                     raise  # the savepoint could not save the transaction
-                kind = public_db_error(exc) if isinstance(exc, DB_ERRORS) else type(exc).__name__
+                # public_db_error keeps a transient error's first line, and an
+                # OSError from a hook (a webhook, a timeout) is not the database.
+                is_db = isinstance(exc, DB_ERRORS) and not isinstance(exc, OSError)
+                kind = public_db_error(exc) if is_db else type(exc).__name__
                 logger.error(
                     "on_transition hook %s failed for job %s %s -> %s: %s at %s",
                     getattr(hook, "__qualname__", type(hook).__name__),
