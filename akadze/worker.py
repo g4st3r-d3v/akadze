@@ -801,25 +801,27 @@ def _describe(error: BaseException) -> str:
     return f"{kind}: {message}" if message else kind
 
 
-async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> None:
-    result = await connection.execute(
-        text(
-            f"""
-            UPDATE akadze.jobs
-            SET state = 'cancelled', finished_at = now()
-            WHERE id IN (
-                SELECT due.id
-                FROM akadze.jobs AS due
-                WHERE due.state = 'queued'
-                  AND due.queue = :queue
-                  AND {to_cancel("due")}
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING {_COLUMNS}, false AS expired
-            """
-        ),
-        {"queue": queue},
+# Runs on every claim pass; the partial indexes of migration 006 keep it to the
+# rows it closes, not the queue's other queued rows.
+_CANCEL_DUE = text(
+    f"""
+    UPDATE akadze.jobs
+    SET state = 'cancelled', finished_at = now()
+    WHERE id IN (
+        SELECT due.id
+        FROM akadze.jobs AS due
+        WHERE due.state = 'queued'
+          AND due.queue = :queue
+          AND {to_cancel("due")}
+        FOR UPDATE SKIP LOCKED
     )
+    RETURNING {_COLUMNS}, false AS expired
+    """
+)
+
+
+async def _cancel_due(connection: AsyncConnection, hooks: Hooks, queue: str) -> None:
+    result = await run_hot(connection, _CANCEL_DUE, {"queue": queue})
     for row in result.mappings():
         job = job_from_mapping(row)
         await hooks.ran_transition(connection, job, "queued", "cancelled")

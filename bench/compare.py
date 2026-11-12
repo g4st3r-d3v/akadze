@@ -14,6 +14,9 @@ can do that on. Usage:
     BENCH_DSN=postgresql://user:pass@host:5432 python bench/compare.py [runs]
 
 ``BENCH_LIBS=akadze`` (comma-separated) runs only the named libraries.
+``BENCH_OUTCOME_BATCH_MS=10`` runs the akadze worker with ``outcome_batch``.
+``BENCH_BACKLOG=100000`` adds that many delayed akadze jobs to the same queue first.
+``BENCH_LOOP=uvloop`` runs everything on uvloop instead of the asyncio loop.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ DSN = os.environ.get("BENCH_DSN", "postgresql://akadze:akadze@localhost:5432")
 N = int(os.environ.get("BENCH_N", "10000"))
 M = int(os.environ.get("BENCH_M", "1000"))
 CONCURRENCY = int(os.environ.get("BENCH_CONCURRENCY", "20"))
+BACKLOG = int(os.environ.get("BENCH_BACKLOG", "0"))  # akadze only: delayed jobs alongside
 SELECTED = {name for name in os.environ.get("BENCH_LIBS", "").split(",") if name}
 POLL = 0.05  # seconds between polls for PgQueuer and Procrastinate
 
@@ -82,6 +86,12 @@ async def bench_akadze() -> dict[str, float]:
     async def noop() -> None:
         return None
 
+    if BACKLOG:
+        # Queued but not due: a real queue's future work, in the same queue.
+        async with app.engine.begin() as connection:
+            await noop.using(session=connection, delay=timedelta(days=1)).enqueue_many(
+                {} for _ in range(BACKLOG)
+            )
     started = time.perf_counter()
     async with app.engine.begin() as connection:
         await noop.using(session=connection).enqueue_many({} for _ in range(N))
@@ -104,9 +114,11 @@ async def bench_akadze() -> dict[str, float]:
             serving.result()  # raises what stopped the worker
             raise RuntimeError("worker stopped before the queue was empty")
         # Partial indexes cover queued and running, so this stays cheap.
-        return not await probe.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM akadze.jobs WHERE state IN ('queued', 'running'))"
+        # Finished rows are on jobs_finished_at_idx; a backlog does not make this slower.
+        finished = await probe.fetchval(
+            "SELECT count(*) FROM akadze.jobs WHERE state IN ('succeeded', 'failed', 'cancelled')"
         )
+        return bool(finished >= N)
 
     try:
         await wait_until(done)
