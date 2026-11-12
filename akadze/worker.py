@@ -31,6 +31,7 @@ from akadze.job import (
     Job,
     job_by_id,
     job_from_mapping,
+    run_hot,
     running_jobs,
 )
 from akadze.maintenance import prune, rescue
@@ -862,6 +863,25 @@ async def _finish(
             logger.info("job %s finish discarded", job.id)
 
 
+# Built once: it runs once per job.
+_APPLY = text(
+    f"""
+    UPDATE akadze.jobs
+    SET state = :state,
+        attempt = :attempt,
+        snoozes = :snoozes,
+        run_at = coalesce(now() + CAST(:delay AS interval), run_at),
+        worker_id = CASE WHEN :state = 'queued' THEN NULL ELSE worker_id END,
+        started_at = CASE WHEN :state = 'queued' THEN NULL ELSE started_at END,
+        finished_at = CASE WHEN :state = 'queued' THEN NULL ELSE now() END,
+        errors = CAST(:errors AS jsonb),
+        result = CAST(:result AS jsonb)
+    WHERE id = :id AND run_count = :run_count AND state = 'running'
+    RETURNING {_COLUMNS}, false AS expired
+    """
+)
+
+
 async def _apply(
     connection: AsyncConnection,
     hooks: Hooks,
@@ -874,32 +894,14 @@ async def _apply(
 ) -> bool:
     outcome = decide(job, exc, result, policy, honor_cancel=honor_cancel)
     errors = push_error(list(job.errors), outcome)
-    updated = await connection.execute(
-        text(
-            f"""
-            UPDATE akadze.jobs
-            SET state = :state,
-                attempt = :attempt,
-                snoozes = :snoozes,
-                run_at = CASE
-                    WHEN :has_delay THEN now() + CAST(:delay AS interval)
-                    ELSE run_at
-                END,
-                worker_id = CASE WHEN :state = 'queued' THEN NULL ELSE worker_id END,
-                started_at = CASE WHEN :state = 'queued' THEN NULL ELSE started_at END,
-                finished_at = CASE WHEN :state = 'queued' THEN NULL ELSE now() END,
-                errors = CAST(:errors AS jsonb),
-                result = CAST(:result AS jsonb)
-            WHERE id = :id AND run_count = :run_count AND state = 'running'
-            RETURNING {_COLUMNS}, false AS expired
-            """
-        ),
+    updated = await run_hot(
+        connection,
+        _APPLY,
         {
             "state": outcome.state,
             "attempt": outcome.attempt,
             "snoozes": outcome.snoozes,
-            "has_delay": outcome.delay is not None,
-            "delay": outcome.delay or timedelta(0),
+            "delay": outcome.delay,
             "errors": json.dumps(errors),
             "result": outcome.result_json,
             "id": job.id,
