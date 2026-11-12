@@ -8,7 +8,7 @@
 `--slots` действует на каждую очередь: с тремя `--queue` воркер выполняет до `3 × slots` заданий. Без `--queue` он берёт задания из `default`.
 
 !!! note "Большая таблица `akadze.jobs`"
-    Миграция `005_jobs_meta` строит GIN-индекс по `akadze.jobs.meta` и на время построения блокирует запись в таблицу. На большой таблице сначала создайте его сами: `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_meta_idx ON akadze.jobs USING gin (meta jsonb_path_ops)` — тогда миграция его пропустит.
+    Миграция `005_jobs_meta` строит GIN-индекс по `akadze.jobs.meta` и на время построения блокирует запись в таблицу. На большой таблице сначала создайте его сами: `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_meta_idx ON akadze.jobs USING gin (meta jsonb_path_ops)` — тогда миграция его пропустит. Миграция `006_jobs_cancel_idx` так же добавляет небольшой частичный индекс для шага отмены; на большой таблице сначала создайте его сами: `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_cancel_idx ON akadze.jobs (queue) WHERE state = 'queued' AND (cancel_requested_at IS NOT NULL OR expires_at IS NOT NULL)`.
 
 ### Rolling deploy
 

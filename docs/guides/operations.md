@@ -8,7 +8,7 @@
 `--slots` is per queue: with three `--queue` flags a worker runs up to `3 × slots` jobs. Without `--queue` it claims from `default`.
 
 !!! note "Large existing `akadze.jobs` table"
-    Migration `005_jobs_meta` builds a GIN index on `akadze.jobs.meta` and blocks writes to the table while it runs. On a large table create it first with `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_meta_idx ON akadze.jobs USING gin (meta jsonb_path_ops)`; the migration then skips it.
+    Migration `005_jobs_meta` builds a GIN index on `akadze.jobs.meta` and blocks writes to the table while it runs. On a large table create it first with `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_meta_idx ON akadze.jobs USING gin (meta jsonb_path_ops)`; the migration then skips it. Migration `006_jobs_cancel_idx` adds a small partial index for the cancel step the same way; on a large table create it first with `CREATE INDEX CONCURRENTLY IF NOT EXISTS jobs_cancel_idx ON akadze.jobs (queue) WHERE state = 'queued' AND (cancel_requested_at IS NOT NULL OR expires_at IS NOT NULL)`.
 
 ### Rolling deploys
 

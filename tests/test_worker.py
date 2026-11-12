@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 from pytest_mock import MockerFixture
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
 from sqlalchemy.dialects.postgresql import psycopg as psycopg_dialect
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -610,3 +611,18 @@ async def test_hot_statement_is_compiled_for_the_connection_dialect(
     sql, sent = connection.exec_driver_sql.await_args.args
     assert sql_part in sql
     assert sent == params
+
+
+async def test_cancel_step_reads_the_cancel_index_not_the_queue(app: Akadze) -> None:
+    # Arrange — forbid sequential scans so the plan shows whether the index applies
+    from akadze.worker import _CANCEL_DUE
+
+    async with app.engine.begin() as connection:
+        await connection.execute(text("SET LOCAL enable_seqscan = off"))
+
+        # Act
+        plan = await connection.execute(text(f"EXPLAIN {_CANCEL_DUE.text}"), {"queue": "default"})
+        lines = [row[0] for row in plan]
+
+    # Assert
+    assert any("jobs_cancel_idx" in line for line in lines), lines

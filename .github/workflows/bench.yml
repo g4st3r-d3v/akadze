@@ -66,9 +66,10 @@ jobs:
           venv-head/bin/pip install -q "$(grep '^uvloop==' head/bench/requirements.txt)"
       - name: Run
         run: |
-          # Variants of the head: -batch = outcome_batch 10 ms (when its Worker has it),
-          # -uvloop = the uvloop event loop.
-          trees="base head head-uvloop"
+          # Variants of a tree: -batch = outcome_batch 10 ms (when the head's Worker has
+          # it), -uvloop = the uvloop event loop, -backlog = 100 000 delayed jobs in the
+          # same queue first.
+          trees="base head base-backlog head-backlog"
           if venv-head/bin/python -c 'import inspect, sys, akadze; sys.exit("outcome_batch" not in inspect.signature(akadze.Worker).parameters)'; then
             trees="$trees head-batch head-batch-uvloop"
           fi
@@ -78,10 +79,12 @@ jobs:
               tree="${variant%%-*}"
               batch=""
               loop=""
+              backlog=0
               case "$variant" in *-batch*) batch=10 ;; esac
-              case "$variant" in *-uvloop) loop=uvloop ;; esac
+              case "$variant" in *-uvloop*) loop=uvloop ;; esac
+              case "$variant" in *-backlog*) backlog=100000 ;; esac
               # The script under test is the head's, so every tree runs the same benchmark.
-              (cd "$tree" && BENCH_OUTCOME_BATCH_MS="$batch" BENCH_LOOP="$loop" "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
+              (cd "$tree" && BENCH_OUTCOME_BATCH_MS="$batch" BENCH_LOOP="$loop" BENCH_BACKLOG="$backlog" "../venv-$tree/bin/python" ../head/bench/compare.py 1) \
                 | python -c 'import json,sys; print(json.load(sys.stdin)["median_s"]["akadze"]["process"])' \
                 >> "$variant.txt"
             done
@@ -99,6 +102,6 @@ jobs:
           for t in trees:
               runs = ", ".join(f"{x:.2f}" for x in rows[t])
               print(f"| {t} | {med[t]:.2f} | {n / med[t]:.0f} | {med['base'] / med[t]:.2f}x | {runs} |")
-          print(f"\n{n} no-op jobs, one worker, 20 slots; -batch = outcome_batch 10 ms, -uvloop = uvloop")
+          print(f"\n{n} no-op jobs, one worker, 20 slots; -batch = outcome_batch 10 ms, -uvloop = uvloop, -backlog = 100k delayed jobs alongside")
           PY
           cat "$GITHUB_STEP_SUMMARY"
